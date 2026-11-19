@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal
+
+ARG EMU_CHANNEL=LTS
+ARG EMU_VERSION=latest
+
+ADD https://downloads.aws.com/aws-emulator/packages/aws-emulator/${EMU_CHANNEL}/${EMU_VERSION}/aws-emulator-x86_64.rpm /tmp/aws-emulator.rpm
+
+RUN rpm -i /tmp/aws-emulator.rpm \
+    && rm -f /tmp/aws-emulator.rpm \
+    && mkdir -p /home/emulator/.aws/emulator \
+    && chown -R 1000:1000 /home/emulator
+
+USER 1000
+ENV HOME=/home/emulator
+EXPOSE 9297
+
+ENTRYPOINT ["aws-emulator"]
+CMD ["-b", "0.0.0.0", "-p", "9297"]

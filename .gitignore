@@ -1,0 +1,6 @@
+logs/
+.aws-emulator/
+.runtime-models.json
+pi-proxy.exe
+refs/*
+!refs/.gitkeep

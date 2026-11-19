@@ -1,0 +1,22 @@
+{
+  "providers": {
+    "sync-strata": {
+      "baseUrl": "http://__WSL_HOST_IP__:18080/v1",
+      "api": "openai-completions",
+      "apiKey": "STRATA_PROXY_TOKEN",
+      "models": [
+        {
+          "id": "qwen3.8-flash-next-sync-s",
+          "name": "Sync-S (Qwen3.8-Flash-Next)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 262144,
+          "maxTokens": 65536
+        }
+      ],
+      "compat": {
+        "supportsDeveloperRole": false
+      }
+    }
+  }
+}
