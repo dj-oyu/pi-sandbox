@@ -6,8 +6,8 @@
       "apiKey": "STRATA_PROXY_TOKEN",
       "models": [
         {
-          "id": "qwen3.8-flash-next-sync-s",
-          "name": "Sync-S (Qwen3.8-Flash-Next)",
+          "id": "__STRATA_MODEL_ID__",
+          "name": "Sync-Strata (__STRATA_MODEL_ID__)",
           "reasoning": true,
           "input": ["text", "image"],
           "contextWindow": 262144,

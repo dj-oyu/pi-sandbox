@@ -12,6 +12,9 @@ param(
     [string]$Image = "pi-sandbox:latest",
 
     [Parameter(Mandatory = $false)]
+    [string]$Model = "auto",
+
+    [Parameter(Mandatory = $false)]
     [string]$ShmSize = "",
 
     [Parameter(Mandatory = $false)]
@@ -67,10 +70,23 @@ if (-not $wslIp) {
     $wslIp = "127.0.0.1"
 }
 
+# Resolve loaded Sync-Strata model ID automatically when -Model auto
+if ($Model -eq "auto") {
+    try {
+        $modelsResp = Invoke-RestMethod -Uri "http://127.0.0.1:8080/v1/models" -TimeoutSec 2 -ErrorAction Stop
+        if ($modelsResp.data -and $modelsResp.data[0].id) {
+            $Model = $modelsResp.data[0].id
+        }
+    } catch {}
+    if ($Model -eq "auto") {
+        $Model = "qwen3.8-flash-next-sync-s"
+    }
+}
+
 # Generate per-session token and runtime models.json
 $token = [Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Maximum 256 }))
 $runtimeModels = Join-Path $SandboxDir ".runtime-models.json"
-(Get-Content (Join-Path $SandboxDir "models.json") -Raw).Replace("__WSL_HOST_IP__", $wslIp) |
+(Get-Content (Join-Path $SandboxDir "models.json") -Raw).Replace("__WSL_HOST_IP__", $wslIp).Replace("__STRATA_MODEL_ID__", $Model) |
     Set-Content -Path $runtimeModels -Encoding UTF8
 
 # Optional AWS Official Emulator sidecar container
@@ -190,7 +206,7 @@ try {
     }
 
     $baseArgs = @($wslcArgs)
-    $runArgs = @($baseArgs) + @($Image, "--provider", "sync-strata", "--model", "qwen3.8-flash-next-sync-s")
+    $runArgs = @($baseArgs) + @($Image, "--provider", "sync-strata", "--model", $Model)
     if ($Prompt) {
         $runArgs += @("-p", $Prompt)
     }
@@ -210,7 +226,7 @@ try {
             } catch { break }
             Write-Host "[pi-sandbox] Target not met yet; auto-continuing (round $retry/2)..." -ForegroundColor Yellow
             $contArgs = @($baseArgs) + @(
-                $Image, "--provider", "sync-strata", "--model", "qwen3.8-flash-next-sync-s",
+                $Image, "--provider", "sync-strata", "--model", $Model,
                 "--continue", "-p",
                 "Target score is not met yet. Continue using tools, finish all remaining deliverables (tests, E2E, README, git commit), and run verify_metrics until TARGET MET."
             )

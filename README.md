@@ -34,19 +34,21 @@ Windows 11 ホスト上の **Sync-Strata**（GPU 推論）と、`wslc.exe` で�
 | **Web UI (Playwright)** | `pi-sandbox-web:latest` | `.\run-pi-web.ps1` | 上記 + Playwright (Chromium のみ)。`--shm-size 512m` で起動。 |
 | **AWS Emulator + Lambda** | `aws-emulator:latest` + `pi-lambda-rie:latest` | `.\run-pi-aws.ps1` | AWS 公式エミュレータ（S3/SQS/DynamoDB）＋ Lambda RIE サブコンテナ。`-Update` で上流追従。 |
 
-### 初回ビルドコマンド
+### 別 PC でのゼロからの再構築手順
+
+**ユーザー側で事前に用意するもの（このリポジトリ外）:**
+* **Windows 11 + WSL (`wslc.exe`)**: `wsl --update` で WSL コンテナ対応版を導入
+* **Sync-Strata**: ホスト側で起動しておく（`sync up --api-only` 等。ロード済みモデルは起動時に自動検出）
+* *(任意)* **GitHub CLI (`gh`)**（`/gh-ci` 監視を使う場合）、**ESP-IDF**（`idf.py` シムを使う場合）
+
+**このリポジトリのセットアップ（1 コマンド）:**
 ```powershell
-# 基本イメージ
-wslc build -t pi-sandbox:latest .
+# 基本環境（pi-sandbox:latest + pi-proxy.exe + pi 初期設定）を構築
+.\setup.ps1
 
-# Web UI (Playwright) 用
-wslc build -f Dockerfile.web -t pi-sandbox-web:latest .
-
-# AWS Emulator + Lambda RIE サブコンテナ用
-wslc build -f Dockerfile.aws-emulator -t aws-emulator:latest .
-wslc build -f Dockerfile.lambda -t pi-lambda-rie:latest .
+# Web UI (Playwright) や AWS Emulator + Lambda RIE も含めて全部構築する場合
+.\setup.ps1 -All
 ```
-※ `pi-proxy.exe` は未ビルドの場合 `.\run-pi.ps1` 実行時に `wslc` 経由で自動ビルドされます。
 
 ---
 
