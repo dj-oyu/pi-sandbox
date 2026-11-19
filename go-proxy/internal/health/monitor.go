@@ -28,10 +28,26 @@ type Target struct {
 }
 
 type Monitor struct {
-	mu      sync.RWMutex
-	targets map[string]*Target
-	cfg     *config.Store
-	log     *binlog.Logger
+	mu       sync.RWMutex
+	targets  map[string]*Target
+	cfg      *config.Store
+	log      *binlog.Logger
+	onChange func([]Target)
+}
+
+func (m *Monitor) SetOnChange(fn func([]Target)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onChange = fn
+}
+
+func (m *Monitor) notify() {
+	m.mu.RLock()
+	cb := m.onChange
+	m.mu.RUnlock()
+	if cb != nil {
+		cb(m.Snapshot())
+	}
 }
 
 func NewMonitor(cfg *config.Store, log *binlog.Logger) *Monitor {
@@ -108,6 +124,7 @@ func (m *Monitor) checkOne(name string) {
 		t.Failures = 0
 		t.LastError = ""
 		m.mu.Unlock()
+		m.notify()
 		return
 	}
 	t.Healthy = false
@@ -115,6 +132,7 @@ func (m *Monitor) checkOne(name string) {
 	t.LastError = err.Error()
 	shouldHeal := m.cfg.Get().AutoHealEnabled && t.Failures >= 3 && len(restartArgs) > 0
 	m.mu.Unlock()
+	m.notify()
 
 	m.log.Write(map[string]any{
 		"event":     "container_unhealthy",

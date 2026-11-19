@@ -18,8 +18,14 @@ import (
 	"pi-proxy/internal/arena"
 	"pi-proxy/internal/binlog"
 	"pi-proxy/internal/config"
+	"pi-proxy/internal/events"
+	"pi-proxy/internal/fsview"
 	"pi-proxy/internal/health"
 	"pi-proxy/internal/jobs"
+	"pi-proxy/internal/lsp"
+	"pi-proxy/internal/mcp"
+	"pi-proxy/internal/sessions"
+	"pi-proxy/internal/ui"
 )
 
 var (
@@ -43,6 +49,9 @@ type ServerDeps struct {
 	Runner    *jobs.Runner
 	Monitor   *health.Monitor
 	Arena     *arena.Service
+	Hub       *events.Hub
+	LSP       *lsp.Manager
+	MCP       *mcp.Manager
 	StrataSem chan struct{}
 }
 
@@ -54,10 +63,15 @@ func NewAPIHandler(d ServerDeps) http.Handler {
 		d.APILog.Write(map[string]any{"event": "upstream_error", "url": r.URL.RequestURI(), "error": err.Error()})
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Bad Gateway", "detail": err.Error()})
 	}
+	uiHandler := ui.Handler()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/ui" {
-			d.Arena.HandleUI(w, r)
+		if r.URL.Path == "/admin/ui" || strings.HasPrefix(r.URL.Path, "/admin/ui/") {
+			if r.URL.Path == "/admin/ui" {
+				http.Redirect(w, r, "/admin/ui/", http.StatusMovedPermanently)
+				return
+			}
+			uiHandler.ServeHTTP(w, r)
 			return
 		}
 		if !checkAuth(d.Cfg, r) {
@@ -67,6 +81,8 @@ func NewAPIHandler(d ServerDeps) http.Handler {
 		}
 
 		switch {
+		case r.URL.Path == "/admin/events":
+			handleSSE(d, w, r)
 		case r.URL.Path == "/admin/config":
 			handleConfig(d, w, r)
 		case r.URL.Path == "/admin/health":
@@ -80,12 +96,48 @@ func NewAPIHandler(d ServerDeps) http.Handler {
 			} else {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 			}
+		case r.URL.Path == "/admin/logs/recent":
+			handleLogsRecent(d, w, r)
 		case r.URL.Path == "/admin/logs/export":
 			handleLogExport(d, w, r)
+		case r.URL.Path == "/admin/pi/sessions":
+			handlePiSessions(d, w, r)
+		case r.URL.Path == "/admin/pi/session":
+			handlePiSessionRead(d, w, r)
+		case r.URL.Path == "/admin/fs/tree":
+			handleFSTree(d, w, r)
+		case r.URL.Path == "/admin/fs/raw":
+			handleFSRaw(d, w, r)
+		case r.URL.Path == "/admin/lsp/status":
+			if d.LSP == nil {
+				writeJSON(w, http.StatusOK, map[string]any{"languages": []any{}})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"languages": d.LSP.Status()})
+		case r.URL.Path == "/admin/lsp/hover":
+			handleLSPHover(d, w, r)
+		case r.URL.Path == "/admin/lsp/definition":
+			handleLSPDefinition(d, w, r)
+		case r.URL.Path == "/admin/mcp/servers":
+			handleMCPServers(d, w, r)
+		case strings.HasPrefix(r.URL.Path, "/admin/mcp/servers/"):
+			handleMCPServerAction(d, w, r)
+		case strings.HasPrefix(r.URL.Path, "/mcp/"):
+			handleMCPGateway(d, w, r)
 		case r.URL.Path == "/admin/strata/chat":
 			d.Arena.HandleStrataChat(w, r)
 		case r.URL.Path == "/admin/arena/run":
 			d.Arena.HandleArenaRun(w, r)
+		case r.URL.Path == "/admin/arena/history":
+			d.Arena.HandleArenaHistory(w, r)
+		case r.URL.Path == "/admin/arena/context":
+			handleArenaContext(d, w, r)
+		case r.URL.Path == "/admin/arena/advice":
+			d.Arena.HandleAdvice(w, r)
+		case r.URL.Path == "/admin/saas/presets":
+			handleSaaSPresets(d, w, r)
+		case r.URL.Path == "/admin/saas/presets/activate":
+			handleSaaSPresetActivate(d, w, r)
 		case strings.HasPrefix(r.URL.Path, "/gh-ci/"):
 			handleGHCI(d, w, r)
 		case r.URL.Path == "/esp-idf/run":
@@ -322,6 +374,19 @@ func handleESPIDF(d ServerDeps, w http.ResponseWriter, r *http.Request) {
 func handleStrataProxy(d ServerDeps, rp *httputil.ReverseProxy, w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 16*1024*1024))
+	if d.Arena != nil && r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/chat/completions") {
+		if adv := d.Arena.PopAdvice(); adv != "" {
+			if updated, ok := injectAdviceIntoChatBody(bodyBytes, adv); ok {
+				bodyBytes = updated
+				r.ContentLength = int64(len(bodyBytes))
+				r.Header.Del("Content-Length")
+				d.CtrlLog.Write(map[string]any{"event": "advice_injected", "len": len(adv)})
+			} else {
+				// Restore if body wasn't a valid chat/completions payload
+				d.Arena.QueueAdvice(adv)
+			}
+		}
+	}
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.Header.Del("Authorization")
 	r.Header.Del("X-Api-Key")
@@ -335,8 +400,21 @@ func handleStrataProxy(d ServerDeps, rp *httputil.ReverseProxy, w http.ResponseW
 		return
 	}
 
-	sw := &statusRecorder{ResponseWriter: w, status: 200}
+	sw := &statusRecorder{ResponseWriter: w, status: 200, started: started}
 	rp.ServeHTTP(sw, r)
+
+	elapsedMs := time.Since(started).Milliseconds()
+	if d.Hub != nil && strings.HasPrefix(r.URL.Path, "/v1/") && sw.status < 400 && elapsedMs > 0 {
+		toks := sw.tokens()
+		if toks > 0 {
+			tokPerSec := float64(toks) / (float64(elapsedMs) / 1000.0)
+			d.Hub.Publish("strata_speed", map[string]any{
+				"tokPerSec":  tokPerSec,
+				"tokens":     toks,
+				"durationMs": elapsedMs,
+			})
+		}
+	}
 
 	d.APILog.Write(map[string]any{
 		"event":      "api_call",
@@ -344,7 +422,7 @@ func handleStrataProxy(d ServerDeps, rp *httputil.ReverseProxy, w http.ResponseW
 		"method":     r.Method,
 		"url":        r.URL.RequestURI(),
 		"status":     sw.status,
-		"durationMs": time.Since(started).Milliseconds(),
+		"durationMs": elapsedMs,
 		"reqBytes":   len(bodyBytes),
 		"resBytes":   sw.bytes,
 	})
@@ -352,8 +430,12 @@ func handleStrataProxy(d ServerDeps, rp *httputil.ReverseProxy, w http.ResponseW
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status     int
+	bytes      int
+	started    time.Time
+	sseChunks  int
+	lastUsage  int
+	tailBuf    []byte
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -364,7 +446,39 @@ func (s *statusRecorder) WriteHeader(code int) {
 func (s *statusRecorder) Write(p []byte) (int, error) {
 	n, err := s.ResponseWriter.Write(p)
 	s.bytes += n
+	if n > 0 {
+		s.sseChunks += bytes.Count(p[:n], []byte("data:"))
+		if len(p[:n]) <= 4096 {
+			s.tailBuf = append(s.tailBuf, p[:n]...)
+			if len(s.tailBuf) > 8192 {
+				s.tailBuf = s.tailBuf[len(s.tailBuf)-8192:]
+			}
+		} else {
+			s.tailBuf = append([]byte(nil), p[n-4096:n]...)
+		}
+	}
 	return n, err
+}
+
+func (s *statusRecorder) tokens() int {
+	// Try to parse completion_tokens from trailing JSON / SSE chunk
+	if idx := bytes.LastIndex(s.tailBuf, []byte(`"completion_tokens"`)); idx >= 0 {
+		sub := s.tailBuf[idx:]
+		if colon := bytes.IndexByte(sub, ':'); colon >= 0 {
+			var numStr strings.Builder
+			for _, b := range sub[colon+1:] {
+				if b >= '0' && b <= '9' {
+					numStr.WriteByte(b)
+				} else if numStr.Len() > 0 {
+					break
+				}
+			}
+			if v, err := strconv.Atoi(numStr.String()); err == nil && v > 0 {
+				return v
+			}
+		}
+	}
+	return s.sseChunks
 }
 
 func (s *statusRecorder) Flush() {
@@ -384,11 +498,389 @@ func checkAuth(cfg *config.Store, r *http.Request) bool {
 	if r.Header.Get("X-Api-Key") == tok {
 		return true
 	}
+	if strings.HasPrefix(r.URL.Path, "/admin/") && r.URL.Query().Get("token") == tok {
+		return true
+	}
 	return false
+}
+
+func handleSSE(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if d.Hub == nil {
+		http.Error(w, "SSE unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch, cancel := d.Hub.Subscribe()
+	defer cancel()
+
+	// Send initial connected event
+	_, _ = w.Write([]byte("event: ready\ndata: {\"ok\":true}\n\n"))
+	flusher.Flush()
+
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ping.C:
+			_, _ = w.Write([]byte(": ping\n\n"))
+			flusher.Flush()
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			b, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
+			flusher.Flush()
+		}
+	}
+}
+
+func handleLogsRecent(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	stream := r.URL.Query().Get("stream")
+	if stream == "" {
+		stream = "all"
+	}
+	tail := 80
+	if t, err := strconv.Atoi(r.URL.Query().Get("tail")); err == nil && t > 0 && t <= 500 {
+		tail = t
+	}
+	c := d.Cfg.Get()
+	streams := []string{"api-audit", "egress", "control"}
+	if stream != "all" {
+		streams = []string{stream}
+	}
+	type logEntry struct {
+		Stream string         `json:"stream"`
+		Record map[string]any `json:"record"`
+	}
+	var items []logEntry
+	for _, sName := range streams {
+		recs, err := binlog.ReadTail(filepath.Join(c.LogDir, sName+".bin"), tail)
+		if err != nil {
+			continue
+		}
+		for _, rec := range recs {
+			items = append(items, logEntry{Stream: sName, Record: rec})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func handlePiSessions(d ServerDeps, w http.ResponseWriter, _ *http.Request) {
+	c := d.Cfg.Get()
+	list, err := sessions.List(c.SessionsDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": list})
+}
+
+func handlePiSessionRead(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id is required"})
+		return
+	}
+	offset := int64(-1)
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			offset = parsed
+		}
+	}
+	before := int64(-1)
+	if v := r.URL.Query().Get("before"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			before = parsed
+		}
+	}
+	limit := 40
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	c := d.Cfg.Get()
+	res, err := sessions.Read(c.SessionsDir, id, offset, before, limit)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func handleFSTree(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	hidden := r.URL.Query().Get("hidden") == "1"
+	entries, err := fsview.ListDir(d.Cfg.Get().Workspace, dir, hidden)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dir": dir, "entries": entries})
+}
+
+func handleFSRaw(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+	if r.URL.Query().Get("download") == "1" {
+		target, norm, err := fsview.ResolveSafe(d.Cfg.Get().Workspace, p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(norm)))
+		http.ServeFile(w, r, target)
+		return
+	}
+	data, size, truncated, err := fsview.ReadFilePreview(d.Cfg.Get().Workspace, p)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":      p,
+		"size":      size,
+		"truncated": truncated,
+		"content":   string(data),
+	})
+}
+
+func handleLSPHover(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || d.LSP == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	var req struct {
+		Path      string `json:"path"`
+		Line      int    `json:"line"`
+		Character int    `json:"character"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := d.LSP.Hover(r.Context(), d.Cfg.Get().Workspace, req.Path, req.Line, req.Character)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"found": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func handleLSPDefinition(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || d.LSP == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	var req struct {
+		Path      string `json:"path"`
+		Line      int    `json:"line"`
+		Character int    `json:"character"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	locs, err := d.LSP.Definition(r.Context(), d.Cfg.Get().Workspace, req.Path, req.Line, req.Character)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"locations": []any{}, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"locations": locs})
+}
+
+func handleMCPServers(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if d.MCP == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"servers": []any{}})
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{"servers": d.MCP.List()})
+		return
+	}
+	if r.Method == http.MethodPost {
+		var cfg mcp.ServerConfig
+		if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := d.MCP.Upsert(cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		d.CtrlLog.Write(map[string]any{"event": "mcp_upsert", "name": cfg.Name, "transport": cfg.Transport})
+		writeJSON(w, http.StatusOK, map[string]any{"servers": d.MCP.List()})
+		return
+	}
+	http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+}
+
+func handleMCPServerAction(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if d.MCP == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "mcp unavailable"})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/admin/mcp/servers/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "server name required"})
+		return
+	}
+	name := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		if err := d.MCP.Delete(name); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		d.CtrlLog.Write(map[string]any{"event": "mcp_delete", "name": name})
+		writeJSON(w, http.StatusOK, map[string]any{"servers": d.MCP.List()})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "toggle" && r.Method == http.MethodPost {
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+		if err := d.MCP.SetEnabled(name, body.Enabled); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"servers": d.MCP.List()})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "probe" && r.Method == http.MethodPost {
+		tools, err := d.MCP.Probe(r.Context(), name)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "servers": d.MCP.List()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tools": tools, "servers": d.MCP.List()})
+		return
+	}
+	http.Error(w, "Not Found", http.StatusNotFound)
+}
+
+func handleMCPGateway(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || d.MCP == nil {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/mcp/"), "/")
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	started := time.Now()
+	respRaw, err := d.MCP.ProxyJSONRPC(r.Context(), name, rawBody)
+	elapsedMs := time.Since(started).Milliseconds()
+	if err != nil {
+		d.APILog.Write(map[string]any{"event": "mcp_error", "server": name, "error": err.Error(), "durationMs": elapsedMs})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	d.APILog.Write(map[string]any{"event": "mcp_call", "server": name, "durationMs": elapsedMs, "bytes": len(respRaw)})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(respRaw)
+}
+
+func handleSaaSPresets(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Label string `json:"label"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&body)
+	if r.Method == http.MethodPost {
+		updated := d.Cfg.SavePreset(body.Label)
+		d.CtrlLog.Write(map[string]any{"event": "saas_preset_saved", "label": updated.SaaSLabel})
+		writeJSON(w, http.StatusOK, d.Cfg.Get())
+		return
+	}
+	if r.Method == http.MethodDelete {
+		lbl := body.Label
+		if lbl == "" {
+			lbl = r.URL.Query().Get("label")
+		}
+		d.Cfg.DeletePreset(lbl)
+		d.CtrlLog.Write(map[string]any{"event": "saas_preset_deleted", "label": lbl})
+		writeJSON(w, http.StatusOK, d.Cfg.Get())
+		return
+	}
+	http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+}
+
+func handleSaaSPresetActivate(d ServerDeps, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if _, ok := d.Cfg.ActivatePreset(body.Label); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "preset not found"})
+		return
+	}
+	d.CtrlLog.Write(map[string]any{"event": "saas_preset_activated", "label": body.Label})
+	writeJSON(w, http.StatusOK, d.Cfg.Get())
+}
+
+func handleArenaContext(d ServerDeps, w http.ResponseWriter, _ *http.Request) {
+	c := d.Cfg.Get()
+	files, _ := fsview.ListVisibleFiles(c.Workspace)
+	initialPrompt := sessions.LatestInitialPrompt(c.SessionsDir)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"initialPrompt": initialPrompt,
+		"files":         files,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func injectAdviceIntoChatBody(body []byte, advice string) ([]byte, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+	msgs, ok := payload["messages"].([]any)
+	if !ok {
+		return nil, false
+	}
+	msgs = append(msgs, map[string]any{
+		"role":    "user",
+		"content": "[External AI Advice — consider this guidance in your next step]\n" + advice,
+	})
+	payload["messages"] = msgs
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }

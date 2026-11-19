@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pi-proxy Control Console</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --pane: #0f1522;
+      --pane-2: #161f30;
+      --border: #243047;
+      --text: #e2e8f0;
+      --muted: #8494ad;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+      --warn: #eab308;
+      --err: #ef4444;
+      --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12.5px; }
+
+    .topbar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 14px;
+      background: var(--pane);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar-left, .topbar-right { display: flex; align-items: center; gap: 14px; }
+    .brand { font-weight: 700; font-size: 13.5px; letter-spacing: 0.02em; }
+    .stat-inline { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+    .dot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+    .dot.ok { background: var(--ok); }
+
+    /* Aligned 2x2 Axis Grid: Left=Infra/Obs, Right=AI | Top=Live/Direct, Bottom=Streams/Multi-turn */
+    .cockpit {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      height: calc(100vh - 44px);
+      gap: 1px;
+      background: var(--border);
+    }
+    .pane {
+      background: var(--pane);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .pane-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 12px;
+      background: var(--pane-2);
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 12px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .pane-controls { display: flex; align-items: center; gap: 8px; font-weight: 400; font-size: 11.5px; color: var(--muted); }
+    .pane-body { padding: 10px 12px; overflow: auto; flex: 1; min-height: 0; }
+
+    .inline-drawer {
+      background: #0b101b;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 12px;
+      flex-shrink: 0;
+    }
+
+    input, textarea, select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 7px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    input.mono, textarea.mono { font-family: var(--mono); font-size: 11.5px; }
+    button {
+      background: var(--accent);
+      color: #06283d;
+      border: 0;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-weight: 700;
+      font-size: 11.5px;
+      cursor: pointer;
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-weight: 500;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+    th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #1b2538; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 11px; }
+    .sub { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .tag {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+      background: var(--pane-2);
+    }
+    .tag.ok { color: #4ade80; border-color: rgba(34,197,94,0.4); }
+    .tag.warn { color: #facc15; border-color: rgba(234,179,8,0.4); }
+    .tag.err { color: #f87171; border-color: rgba(239,68,68,0.4); }
+
+    pre.term {
+      background: #05080f;
+      border: 1px solid #1b2538;
+      border-radius: 4px;
+      padding: 7px 9px;
+      font-family: var(--mono);
+      font-size: 11px;
+      margin: 6px 0 0;
+      overflow: auto;
+      max-height: 110px;
+      color: #cbd5e1;
+    }
+
+    .stream-box { display: flex; flex-direction: column; gap: 6px; overflow: auto; flex: 1; padding-right: 2px; }
+    .msg {
+      padding: 7px 10px;
+      border-left: 2px solid var(--border);
+      background: #0c121e;
+      font-size: 12px;
+    }
+    .msg.strata { border-left-color: var(--accent); }
+    .msg.saas { border-left-color: #a855f7; }
+    .msg.user { border-left-color: var(--muted); background: var(--pane-2); }
+    .msg .mhead { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 3px; }
+    .composer { display: flex; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); flex-shrink: 0; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+    .hidden { display: none !important; }
+    .view-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+    .view-switch button { background: transparent; color: var(--muted); border-radius: 0; padding: 3px 9px; font-weight: 600; }
+    .view-switch button.active { background: var(--accent); color: #06283d; }
+
+    .files-view {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      height: calc(100vh - 44px);
+      gap: 1px;
+      background: var(--border);
+    }
+    .tree-item {
+      display: flex; justify-content: space-between; gap: 8px;
+      padding: 4px 8px; border-radius: 3px; cursor: pointer;
+      font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    }
+    .tree-item:hover { background: var(--pane-2); }
+    .tree-item.active { background: #162844; color: var(--accent); }
+    details.thinking {
+      margin: 4px 0;
+      padding: 4px 8px;
+      background: #080d17;
+      border: 1px dashed var(--border);
+      border-radius: 3px;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    details.thinking summary { cursor: pointer; font-family: var(--mono); font-size: 11px; color: #94a3b8; }
+
+    @media (max-width: 1000px) {
+      .cockpit, .files-view { grid-template-columns: 1fr; height: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand">pi-proxy Console</span>
+      <div class="view-switch">
+        <button id="btnCockpit" class="active" onclick="switchView('cockpit')">Cockpit</button>
+        <button id="btnFiles" onclick="switchView('files')">Files</button>
+      </div>
+      <span class="stat-inline"><span class="dot ok"></span>SSE /admin/events</span>
+      <span class="stat-inline"><span class="dot ok"></span>sync-strata :8080</span>
+      <span class="stat-inline" id="strataSpeed">Strata <strong style="color:var(--accent);">42.8 tok/s</strong></span>
+      <span class="stat-inline"><span class="dot ok"></span>aws-emulator :19297</span>
+      <span class="stat-inline">Egress :18888</span>
+    </div>
+    <div class="topbar-right">
+      <input id="token" class="mono" type="password" placeholder="PI_PROXY_TOKEN" style="width:160px;" />
+      <span class="tag">MOCKUP</span>
+    </div>
+  </header>
+
+  <div id="cockpitView" class="cockpit">
+    <!-- TOP-LEFT: Infra Live State (Health + Parallel Jobs) -->
+    <section class="pane">
+      <div class="pane-head">
+        <span>Runtime Monitor（死活 ＆ 並列ジョブ）</span>
+        <div class="pane-controls">
+          <label class="row" style="gap:4px;"><input type="checkbox" checked onchange="toast('Auto-Heal 更新')" /> Auto-Heal</label>
+          <span>間隔 <input type="number" value="10" min="2" max="300" style="width:52px;" />s</span>
+          <button class="ghost" onclick="toast('ヘルス設定を PATCH')">適用</button>
+        </div>
+      </div>
+      <div class="pane-body">
+        <table style="margin-bottom: 10px;">
+          <thead><tr><th>Sidecar</th><th>State</th><th>Fails</th><th>Heals</th><th>Last Check</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>aws-emulator</code></td>
+              <td><span class="tag ok">HEALTHY</span></td>
+              <td>0</td><td>0</td><td class="sub">20:09:12Z</td>
+            </tr>
+            <tr>
+              <td><code>pi-lambda-rie</code></td>
+              <td><span class="tag">ON-DEMAND</span></td>
+              <td>-</td><td>-</td><td class="sub">20:07:40Z</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <table>
+          <thead><tr><th>Job ID</th><th>Kind</th><th>Command</th><th>Status</th><th>Time</th></tr></thead>
+          <tbody>
+            <tr onclick="showJob('esp')" style="cursor:pointer;">
+              <td><code>job-14</code></td><td>esp-idf</td><td><code>idf.py build</code></td>
+              <td><span class="tag warn">RUNNING</span></td><td>4.2s</td>
+            </tr>
+            <tr onclick="showJob('gh')" style="cursor:pointer;">
+              <td><code>job-13</code></td><td>gh-ci</td><td><code>gh api .../runs</code></td>
+              <td><span class="tag ok">EXIT 0</span></td><td>312ms</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre id="jobOutput" class="term">[job-14 stdout] [42/118] Building C object esp-idf/main/app_main.c.obj</pre>
+      </div>
+    </section>
+
+    <!-- TOP-RIGHT: Pi Live Proxy Transcript (Pi Console) -->
+    <section class="pane">
+      <div class="pane-head">
+        <span>Pi Console</span>
+        <div class="pane-controls">
+          <span class="sub">qwen3.8-flash-next-sync-s</span>
+          <span>並列枠 <input type="number" value="1" min="1" max="16" style="width:46px;" /></span>
+          <button class="ghost" onclick="toast('並列枠を PATCH')">適用</button>
+        </div>
+      </div>
+      <div class="pane-body" style="display:flex; flex-direction:column;">
+        <div class="stream-box" id="strataList">
+          <div class="msg user"><div class="mhead">USER · 20:14:00</div><code>src/handler.ts</code> の DynamoDB 条件付き更新の実装を確認して修正してください。</div>
+          <div class="msg strata">
+            <div class="mhead">ASSISTANT · 1.8s · 43.2 tok/s · usage: 331→102</div>
+            <details class="thinking">
+              <summary>thinking (reasoning_content · 142 chars)</summary>
+              まず <code>src/handler.ts</code> を read で読み、<code>UpdateItem</code> の <code>ConditionExpression</code> と予約語エスケープを確認する。
+            </details>
+            <div><span class="tag">toolCall: read</span> <code>{"path":"src/handler.ts"}</code></div>
+          </div>
+          <div class="msg user">
+            <div class="mhead">TOOL RESULT · read · ok</div>
+            <code>142 lines read (ConditionExpression: "status = :expected")</code>
+          </div>
+        </div>
+        <div class="composer">
+          <input id="strataInput" style="flex:1;" placeholder="Sync-Strata へ直接テスト送信 (/admin/strata/chat)..." />
+          <button onclick="sendStrata()">送信</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- BOTTOM-LEFT: Infra Stream (Binary Logs + Egress Allowlist) -->
+    <section class="pane">
+      <div class="pane-head">
+        <span>Logs ＆ Egress</span>
+        <div class="pane-controls">
+          <select id="logStream" onchange="renderLogs()">
+            <option value="all">all streams</option>
+            <option value="api-audit">api-audit.bin</option>
+            <option value="egress">egress.bin</option>
+            <option value="control">control.bin</option>
+          </select>
+          <input id="logFilter" placeholder="filter..." style="width:110px;" oninput="renderLogs()" />
+          <button class="ghost" onclick="toggleEl('allowlistDrawer')">許可ドメイン (5) ▾</button>
+          <button class="ghost" onclick="toast('GET /admin/logs/export?format=jsonl')">JSONL</button>
+        </div>
+      </div>
+      <div id="allowlistDrawer" class="inline-drawer hidden">
+        <div class="row" style="justify-content:space-between; margin-bottom:4px;">
+          <span class="sub">allowedHosts（1行1ドメイン · Egress :18888 に即時反映）</span>
+          <button onclick="toggleEl('allowlistDrawer'); toast('allowedHosts を PATCH')">保存して閉じる</button>
+        </div>
+        <textarea class="mono" rows="4" style="width:100%;">registry.npmjs.org
+github.com
+api.github.com
+docs.aws.amazon.com
+*.espressif.com</textarea>
+      </div>
+      <div class="pane-body">
+        <table>
+          <thead><tr><th>Time</th><th>Stream</th><th>Event</th><th>Detail</th></tr></thead>
+          <tbody id="logBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- BOTTOM-RIGHT: AI Multi-turn Stream (AI vs AI) -->
+    <section class="pane">
+      <div class="pane-head">
+        <span>AI vs AI</span>
+        <div class="pane-controls">
+          <span id="saasSummary" class="tag ok">anthropic · claude-sonnet-4-5 · KEY SET</span>
+          <button class="ghost" onclick="toggleEl('saasDrawer')">設定 ▾</button>
+        </div>
+      </div>
+
+      <div id="saasDrawer" class="inline-drawer hidden">
+        <div class="form-grid">
+          <div class="field">
+            <label>API 互換フォーマット</label>
+            <select id="apiFormat" style="width:100%;" onchange="applyFormat()">
+              <option value="anthropic">Anthropic 互換 (/v1/messages)</option>
+              <option value="openai">OpenAI 互換 (/chat/completions)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>認証方式</label>
+            <select id="authType" style="width:100%;" onchange="toggleCustom()">
+              <option value="x-api-key">x-api-key</option>
+              <option value="bearer">Authorization: Bearer</option>
+              <option value="custom">Custom Header</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Base URL</label>
+            <input id="baseUrl" class="mono" value="https://api.anthropic.com" style="width:100%;" />
+          </div>
+          <div class="field">
+            <label>Model</label>
+            <input id="model" class="mono" value="claude-sonnet-4-5" style="width:100%;" />
+          </div>
+          <div class="field">
+            <label>Credential (マスク済み・コンテナ非共有)</label>
+            <input type="password" class="mono" placeholder="変更時のみ入力" style="width:100%;" />
+          </div>
+          <div class="field" id="customWrap" style="display:none;">
+            <label>カスタムヘッダ名</label>
+            <input class="mono" placeholder="X-Api-Token" style="width:100%;" />
+          </div>
+          <div class="field">
+            <label>追加ヘッダ (JSON)</label>
+            <input class="mono" value="{}" style="width:100%;" />
+          </div>
+          <div class="field">
+            <label>Strata System Prompt</label>
+            <textarea id="strataSys" rows="2" style="width:100%;">You are Sync-Strata (local open-weight AI). Discuss concisely and technically.</textarea>
+          </div>
+          <div class="field">
+            <label>SaaS AI System Prompt</label>
+            <textarea id="saasSys" rows="2" style="width:100%;">You are a peer SaaS AI. Challenge assumptions constructively and concisely.</textarea>
+          </div>
+        </div>
+        <div class="row" style="justify-content:flex-end; margin-top:8px;">
+          <button onclick="saveSaas()">設定を反映</button>
+        </div>
+      </div>
+
+      <div class="pane-body" style="display:flex; flex-direction:column;">
+        <div class="row" style="margin-bottom:8px;">
+          <input id="arenaTopic" style="flex:1;" value="ローカルエージェントの検証器設計と失敗許容基準" />
+          <input id="arenaTurns" type="number" value="4" min="2" max="12" style="width:54px;" />
+          <button onclick="runArena()">開始</button>
+        </div>
+        <div class="stream-box" id="arenaList">
+          <div class="msg strata"><div class="mhead">TURN 1 · SYNC-STRATA</div>ホスト側プロキシと実エミュレータを叩く結合テストを `.pi/verifier.json` の最高重みに置くべきです。</div>
+          <div class="msg saas"><div class="mhead">TURN 2 · SAAS (claude-sonnet-4-5)</div>結合テストの前に高速な型チェックと単体テストを fail-fast で置き、無駄な再試行を減らすべきです。</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="filesView" class="files-view hidden">
+    <section class="pane">
+      <div class="pane-head">
+        <span>Workspace Files</span>
+        <div class="pane-controls">
+          <button class="ghost" onclick="toast('GET /admin/fs/tree')">更新</button>
+        </div>
+      </div>
+      <div class="pane-body" id="fileTree">
+        <div class="tree-item active" onclick="openFile('spec', this)"><span>docs/SPEC.md</span><span class="sub">4.2 KB</span></div>
+        <div class="tree-item" onclick="openFile('verifier', this)"><span>.pi/verifier.json</span><span class="sub">0.8 KB</span></div>
+        <div class="tree-item" onclick="openFile('handler', this)"><span>src/handler.ts</span><span class="sub">3.6 KB</span></div>
+        <div class="tree-item" onclick="openFile('readme', this)"><span>README.md</span><span class="sub">2.1 KB</span></div>
+      </div>
+    </section>
+    <section class="pane">
+      <div class="pane-head">
+        <span id="fileTitle" class="mono">docs/SPEC.md</span>
+        <div class="pane-controls">
+          <span id="fileMeta" class="sub">UTF-8 · 4.2 KB</span>
+          <button class="ghost" onclick="toast('GET /admin/fs/raw?path=...')">Raw / Download</button>
+        </div>
+      </div>
+      <div class="pane-body">
+        <pre id="fileContent" class="term" style="max-height:none; height:100%; margin:0; white-space:pre-wrap;"># HTTP Health Check &amp; Latency Probe Spec
+
+## 1. CLI
+- `probe run &lt;url...&gt; --interval 1000 --out data.jsonl`
+- `probe serve --port 3000 --data data.jsonl`
+
+## 2. Acceptance Criteria
+- `npm run typecheck` passes
+- `node --test` passes all unit tests
+- Playwright E2E passes with 0 console errors</pre>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const logs = [
+      { ts: '10:41:21', stream: 'api-audit', cls: 'ok', event: 'sfn_exec_done', detail: 'saga-order-workflow -> SUCCEEDED' },
+      { ts: '10:41:22', stream: 'api-audit', cls: 'ok', event: 'lambda_invoke', detail: 'reserve-inventory (200, 312ms)' },
+      { ts: '10:41:27', stream: 'api-audit', cls: 'ok', event: 'api_call', detail: 'POST /v1/chat/completions (200, 4.2s)' },
+      { ts: '10:41:30', stream: 'egress', cls: 'err', event: 'block_connect', detail: 'evil.example.com:443 -> 403' },
+      { ts: '10:41:35', stream: 'control', cls: 'warn', event: 'config_patched', detail: 'strataConcurrency=1, saas=anthropic' }
+    ];
+    function renderLogs() {
+      const s = document.getElementById('logStream').value;
+      const q = document.getElementById('logFilter').value.toLowerCase();
+      document.getElementById('logBody').innerHTML = logs
+        .filter(x => (s === 'all' || x.stream === s) && (!q || x.event.includes(q) || x.detail.toLowerCase().includes(q)))
+        .map(x => `<tr><td class="sub">${x.ts}</td><td><code>${x.stream}</code></td><td><span class="tag ${x.cls}">${x.event}</span></td><td>${x.detail}</td></tr>`)
+        .join('');
+    }
+    renderLogs();
+
+    function toggleEl(id) {
+      document.getElementById(id).classList.toggle('hidden');
+    }
+    function toast(msg) {
+      console.log('[mockup]', msg);
+    }
+    function showJob(k) {
+      document.getElementById('jobOutput').textContent = k === 'esp'
+        ? '[job-14 stdout] [42/118] Building C object esp-idf/main/app_main.c.obj'
+        : '[job-13 stdout] {"total_count": 3, "workflow_runs": [{"status": "completed", "conclusion": "success"}]}';
+    }
+    function sendStrata() {
+      const i = document.getElementById('strataInput');
+      if (!i.value.trim()) return;
+      const list = document.getElementById('strataList');
+      list.innerHTML += `<div class="msg user"><div class="mhead">USER</div>${i.value}</div>`;
+      list.innerHTML += `<div class="msg strata"><div class="mhead">SYNC-STRATA (SSE)</div>（本番では /admin/strata/chat の応答がここに流れます）</div>`;
+      i.value = '';
+      list.scrollTop = list.scrollHeight;
+    }
+    function runArena() {
+      const list = document.getElementById('arenaList');
+      list.innerHTML += `<div class="msg strata"><div class="mhead">TURN 3 · SYNC-STRATA (SSE)</div>（本番では 1 ターン完了ごとに SSE で即時追記されます）</div>`;
+      list.scrollTop = list.scrollHeight;
+    }
+    function applyFormat() {
+      const f = document.getElementById('apiFormat').value;
+      if (f === 'anthropic') {
+        document.getElementById('baseUrl').value = 'https://api.anthropic.com';
+        document.getElementById('model').value = 'claude-sonnet-4-5';
+        document.getElementById('authType').value = 'x-api-key';
+      } else {
+        document.getElementById('baseUrl').value = 'https://api.openai.com/v1';
+        document.getElementById('model').value = 'gpt-4o-mini';
+        document.getElementById('authType').value = 'bearer';
+      }
+      toggleCustom();
+    }
+    function toggleCustom() {
+      document.getElementById('customWrap').style.display =
+        document.getElementById('authType').value === 'custom' ? 'block' : 'none';
+    }
+    function saveSaas() {
+      const fmt = document.getElementById('apiFormat').value;
+      const mdl = document.getElementById('model').value;
+      document.getElementById('saasSummary').textContent = `${fmt} · ${mdl} · KEY SET`;
+      toggleEl('saasDrawer');
+    }
+    const sampleFiles = {
+      spec: { name: 'docs/SPEC.md', meta: 'UTF-8 · 4.2 KB', body: '# HTTP Health Check & Latency Probe Spec\n\n## 1. CLI\n- `probe run <url...> --interval 1000 --out data.jsonl`\n- `probe serve --port 3000 --data data.jsonl`\n\n## 2. Acceptance Criteria\n- `npm run typecheck` passes\n- `node --test` passes all unit tests\n- Playwright E2E passes with 0 console errors' },
+      verifier: { name: '.pi/verifier.json', meta: 'JSON · 0.8 KB', body: '{\n  "targetScore": 100,\n  "checks": [\n    { "name": "typecheck", "cmd": "npx tsc --noEmit", "weight": 25 },\n    { "name": "lint", "cmd": "npx biome check .", "weight": 25 },\n    { "name": "unit", "cmd": "npm test", "weight": 25 },\n    { "name": "e2e", "cmd": "node test/e2e.cjs", "weight": 25 }\n  ]\n}' },
+      handler: { name: 'src/handler.ts', meta: 'TypeScript · 3.6 KB', body: 'export async function updateOrderStatus(id: string, next: string) {\n  // Fixed reserved keyword `status` using ExpressionAttributeNames\n  return ddb.update({ Key: { id }, ExpressionAttributeNames: { "#s": "status" } });\n}' },
+      readme: { name: 'README.md', meta: 'Markdown · 2.1 KB', body: '# healthdash\n\nRun `npm test` and `npm run e2e`.' }
+    };
+    function switchView(v) {
+      document.getElementById('cockpitView').classList.toggle('hidden', v !== 'cockpit');
+      document.getElementById('filesView').classList.toggle('hidden', v !== 'files');
+      document.getElementById('btnCockpit').classList.toggle('active', v === 'cockpit');
+      document.getElementById('btnFiles').classList.toggle('active', v === 'files');
+    }
+    function openFile(k, el) {
+      document.querySelectorAll('#fileTree .tree-item').forEach(n => n.classList.remove('active'));
+      el.classList.add('active');
+      const f = sampleFiles[k];
+      document.getElementById('fileTitle').textContent = f.name;
+      document.getElementById('fileMeta').textContent = f.meta;
+      document.getElementById('fileContent').textContent = f.body;
+    }
+  </script>
+</body>
+</html>

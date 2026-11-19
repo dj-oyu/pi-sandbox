@@ -22,6 +22,13 @@ type Logger struct {
 	maxBytes int64
 	maxFiles int
 	curSize  int64
+	onWrite  func(map[string]any)
+}
+
+func (l *Logger) SetOnWrite(fn func(map[string]any)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.onWrite = fn
 }
 
 func NewLogger(path string, maxBytes int64, maxFiles int) (*Logger, error) {
@@ -75,6 +82,14 @@ func (l *Logger) Write(record map[string]any) {
 		return
 	}
 	l.curSize += frameLen
+	cb := l.onWrite
+	if cb != nil {
+		cp := make(map[string]any, len(record))
+		for k, v := range record {
+			cp[k] = v
+		}
+		go cb(cp)
+	}
 }
 
 func (l *Logger) rotateLocked() {
@@ -95,14 +110,13 @@ func (l *Logger) rotateLocked() {
 	l.curSize = 0
 }
 
-// ExportJSONL reads a binary log file and writes each valid frame as a JSON line to w.
-func ExportJSONL(binPath string, w io.Writer, tail int) (int, error) {
+func readFrames(binPath string, tail int) ([][]byte, error) {
 	f, err := os.Open(binPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return nil, nil
 		}
-		return 0, err
+		return nil, err
 	}
 	defer f.Close()
 
@@ -114,15 +128,15 @@ func ExportJSONL(binPath string, w io.Writer, tail int) (int, error) {
 			break
 		}
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if [4]byte(hdr[0:4]) != magic {
-			return 0, errors.New("corrupt binary log magic")
+			return nil, errors.New("corrupt binary log magic")
 		}
 		n := binary.LittleEndian.Uint32(hdr[4:8])
 		sum := binary.LittleEndian.Uint32(hdr[8:12])
 		if n > 16*1024*1024 {
-			return 0, errors.New("frame too large")
+			return nil, errors.New("frame too large")
 		}
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(f, buf); err != nil {
@@ -133,13 +147,36 @@ func ExportJSONL(binPath string, w io.Writer, tail int) (int, error) {
 		}
 		lines = append(lines, buf)
 	}
-
-	start := 0
 	if tail > 0 && len(lines) > tail {
-		start = len(lines) - tail
+		lines = lines[len(lines)-tail:]
+	}
+	return lines, nil
+}
+
+// ReadTail reads the trailing valid frames as parsed JSON objects.
+func ReadTail(binPath string, tail int) ([]map[string]any, error) {
+	lines, err := readFrames(binPath, tail)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		var m map[string]any
+		if err := json.Unmarshal(line, &m); err == nil {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// ExportJSONL reads a binary log file and writes each valid frame as a JSON line to w.
+func ExportJSONL(binPath string, w io.Writer, tail int) (int, error) {
+	lines, err := readFrames(binPath, tail)
+	if err != nil {
+		return 0, err
 	}
 	count := 0
-	for _, line := range lines[start:] {
+	for _, line := range lines {
 		if _, err := w.Write(line); err != nil {
 			return count, err
 		}

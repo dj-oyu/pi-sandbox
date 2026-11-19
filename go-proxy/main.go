@@ -16,8 +16,11 @@ import (
 	"pi-proxy/internal/aws"
 	"pi-proxy/internal/binlog"
 	"pi-proxy/internal/config"
+	"pi-proxy/internal/events"
 	"pi-proxy/internal/health"
 	"pi-proxy/internal/jobs"
+	"pi-proxy/internal/lsp"
+	"pi-proxy/internal/mcp"
 	"pi-proxy/internal/proxy"
 )
 
@@ -74,6 +77,7 @@ func runServe() {
 		ProxyToken:        os.Getenv("PI_PROXY_TOKEN"),
 		Workspace:         os.Getenv("PI_WORKSPACE"),
 		LogDir:            logDir,
+		SessionsDir:       envStr("PI_SESSIONS_DIR", filepath.Join(logDir, "sessions")),
 		MaxLogBytes:       maxBytes,
 		MaxLogFiles:       maxFiles,
 		AllowlistPath:     allowlist,
@@ -86,16 +90,28 @@ func runServe() {
 		AWSEmuTargetPort:  envInt("PI_AWS_EMU_TARGET_PORT", 9297),
 		AWSEmuCAPath:      os.Getenv("PI_AWS_EMU_CA"),
 		AWSEmuContainer:   os.Getenv("PI_AWS_EMU_CONTAINER"),
+		SaaSConfigPath:    envStr("PI_SAAS_CONFIG", filepath.Join(logDir, "saas-config.json")),
 		SaaSBaseURL:       os.Getenv("PI_SAAS_BASE_URL"),
 		SaaSModel:         os.Getenv("PI_SAAS_MODEL"),
 		SaaSAPIKey:        os.Getenv("PI_SAAS_API_KEY"),
 	})
 
 	c := cfg.Get()
+	hub := events.NewHub()
+	apiLog.SetOnWrite(func(rec map[string]any) { hub.Publish("log", map[string]any{"stream": "api-audit", "record": rec}) })
+	egressLog.SetOnWrite(func(rec map[string]any) { hub.Publish("log", map[string]any{"stream": "egress", "record": rec}) })
+	ctrlLog.SetOnWrite(func(rec map[string]any) { hub.Publish("log", map[string]any{"stream": "control", "record": rec}) })
+
 	strataSem := make(chan struct{}, c.StrataConcurrency)
 	runner := jobs.NewRunner(c.MaxCommandWorkers)
+	runner.SetOnChange(func(j jobs.Job) { hub.Publish("job", j) })
 	monitor := health.NewMonitor(cfg, ctrlLog)
+	monitor.SetOnChange(func(targets []health.Target) { hub.Publish("health", map[string]any{"targets": targets}) })
 	arenaSvc := arena.NewService(cfg, ctrlLog, strataSem)
+	arenaSvc.SetHub(hub)
+	arenaSvc.SetRunner(runner)
+	lspMgr := lsp.NewManager()
+	mcpMgr := mcp.NewManager(envStr("PI_MCP_CONFIG", filepath.Join(logDir, "mcp-servers.json")))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -131,7 +147,7 @@ func runServe() {
 
 	apiHandler := proxy.NewAPIHandler(proxy.ServerDeps{
 		Cfg: cfg, APILog: apiLog, EgressLog: egressLog, CtrlLog: ctrlLog,
-		Runner: runner, Monitor: monitor, Arena: arenaSvc, StrataSem: strataSem,
+		Runner: runner, Monitor: monitor, Arena: arenaSvc, Hub: hub, LSP: lspMgr, MCP: mcpMgr, StrataSem: strataSem,
 	})
 	egressHandler := proxy.NewEgressHandler(cfg, egressLog)
 
@@ -151,6 +167,8 @@ func runServe() {
 	}()
 
 	<-ctx.Done()
+	mcpMgr.Shutdown()
+	lspMgr.Shutdown()
 	log.Println("[pi-proxy] shutting down")
 }
 

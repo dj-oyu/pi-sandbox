@@ -9,6 +9,8 @@
     "storage.googleapis.com",
     "pypi.org",
     "files.pythonhosted.org",
+    "astral.sh",
+    "*.astral.sh",
     "github.com",
     "api.github.com",
     "objects.githubusercontent.com",

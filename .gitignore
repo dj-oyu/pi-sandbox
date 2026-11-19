@@ -4,3 +4,4 @@ logs/
 pi-proxy.exe
 refs/*
 !refs/.gitkeep
+node_modules/

@@ -36,12 +36,28 @@ type Job struct {
 }
 
 type Runner struct {
-	mu      sync.RWMutex
-	jobs    map[string]*Job
-	order   []string
-	maxKeep int
-	sem     chan struct{}
-	seq     atomic.Uint64
+	mu       sync.RWMutex
+	jobs     map[string]*Job
+	order    []string
+	maxKeep  int
+	sem      chan struct{}
+	seq      atomic.Uint64
+	onChange func(Job)
+}
+
+func (r *Runner) SetOnChange(fn func(Job)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onChange = fn
+}
+
+func (r *Runner) emit(j Job) {
+	r.mu.RLock()
+	cb := r.onChange
+	r.mu.RUnlock()
+	if cb != nil {
+		go cb(j)
+	}
 }
 
 func NewRunner(maxWorkers int) *Runner {
@@ -95,6 +111,7 @@ func (r *Runner) enqueue(kind, label, exe string, args []string, cwd string, tim
 		delete(r.jobs, evict)
 	}
 	r.mu.Unlock()
+	r.emit(*job)
 
 	go r.execute(job, exe, args, cwd, timeout)
 	return job
@@ -107,7 +124,9 @@ func (r *Runner) execute(job *Job, exe string, args []string, cwd string, timeou
 	started := time.Now()
 	r.mu.Lock()
 	job.Status = StatusRunning
+	cp := *job
 	r.mu.Unlock()
+	r.emit(cp)
 
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -149,7 +168,9 @@ func (r *Runner) execute(job *Job, exe string, args []string, cwd string, timeou
 	job.Stdout = tailString(stdout.String(), 32*1024)
 	job.Stderr = tailString(stderr.String(), 16*1024)
 	job.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	cpDone := *job
 	r.mu.Unlock()
+	r.emit(cpDone)
 }
 
 func (r *Runner) Get(id string) (*Job, bool) {
