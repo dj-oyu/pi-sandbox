@@ -24,6 +24,7 @@ import (
 
 	"pi-proxy/internal/binlog"
 	"pi-proxy/internal/config"
+	"pi-proxy/internal/sfn"
 )
 
 var (
@@ -42,12 +43,13 @@ type LambdaEntry struct {
 }
 
 type Bridge struct {
-	cfg        *config.Store
-	log        *binlog.Logger
-	codeRoot   string
-	mu         sync.RWMutex
-	registry   map[string]LambdaEntry
-	emuProxy   *httputil.ReverseProxy
+	cfg      *config.Store
+	log      *binlog.Logger
+	codeRoot string
+	mu       sync.RWMutex
+	registry map[string]LambdaEntry
+	emuProxy *httputil.ReverseProxy
+	sfn      *sfn.Engine
 }
 
 func NewBridge(cfg *config.Store, log *binlog.Logger, codeRoot string) *Bridge {
@@ -73,16 +75,30 @@ func NewBridge(cfg *config.Store, log *binlog.Logger, codeRoot string) *Bridge {
 		})
 	}
 
-	return &Bridge{
+	b := &Bridge{
 		cfg:      cfg,
 		log:      log,
 		codeRoot: codeRoot,
 		registry: make(map[string]LambdaEntry),
 		emuProxy: rp,
 	}
+	b.sfn = sfn.NewEngine(func(ctx context.Context, funcName string, payload []byte) (int, string, []byte, error) {
+		c := b.cfg.Get()
+		emuURL := fmt.Sprintf("http://127.0.0.1:%d", c.AWSEmuPort)
+		if hostIP := detectHostLoopbackOrWSL(); hostIP != "" {
+			emuURL = fmt.Sprintf("http://%s:%d", hostIP, c.AWSEmuPort)
+		}
+		return b.invokeLambdaInternal(ctx, funcName, payload, "requestresponse", emuURL)
+	}, log)
+	return b
 }
 
 func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.Header.Get("X-Amz-Target"), "AWSStepFunctions.") {
+		b.sfn.HandleHTTP(w, r)
+		return
+	}
+
 	reqPath := r.URL.RequestURI()
 
 	if r.Method == http.MethodPost && reCreate.MatchString(reqPath) {
@@ -227,20 +243,9 @@ func (b *Bridge) handleInvoke(w http.ResponseWriter, r *http.Request, funcName s
 		return
 	}
 
-	target, ok := b.resolveTarget(funcName)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"message": "Function not found: " + funcName})
-		return
-	}
 	eventBytes, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
-		return
-	}
-
-	port, err := freePort()
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"message": err.Error()})
 		return
 	}
 
@@ -250,6 +255,38 @@ func (b *Bridge) handleInvoke(w http.ResponseWriter, r *http.Request, funcName s
 		hostOnly = "127.0.0.1"
 	}
 	emuURL := fmt.Sprintf("http://%s:%d", hostOnly, c.AWSEmuPort)
+	status, fnErr, respBytes, err := b.invokeLambdaInternal(r.Context(), funcName, eventBytes, invType, emuURL)
+	if err != nil {
+		b.log.Write(map[string]any{"event": "lambda_invoke_error", "funcName": funcName, "error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"message": err.Error()})
+		return
+	}
+	b.log.Write(map[string]any{
+		"event":          "lambda_invoke",
+		"funcName":       funcName,
+		"invocationType": invType,
+		"status":         status,
+		"functionError":  fnErr,
+		"durationMs":     time.Since(started).Milliseconds(),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	if fnErr != "" {
+		w.Header().Set("x-amz-function-error", fnErr)
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(respBytes)
+}
+
+func (b *Bridge) invokeLambdaInternal(ctx context.Context, funcName string, eventBytes []byte, invType, emuURL string) (int, string, []byte, error) {
+	target, ok := b.resolveTarget(funcName)
+	if !ok {
+		return http.StatusNotFound, "", []byte(`{"message":"Function not found: ` + funcName + `"}`), nil
+	}
+	port, err := freePort()
+	if err != nil {
+		return 0, "", nil, err
+	}
 	containerName := fmt.Sprintf("pi-lambda-%d", time.Now().UnixNano())
 
 	args := []string{
@@ -274,26 +311,22 @@ func (b *Bridge) handleInvoke(w http.ResponseWriter, r *http.Request, funcName s
 	args = append(args, "pi-lambda-rie:latest", target.Handler)
 
 	if out, err := exec.Command("wslc", args...).CombinedOutput(); err != nil {
-		b.log.Write(map[string]any{"event": "lambda_invoke_error", "funcName": funcName, "error": err.Error()})
-		writeJSON(w, http.StatusBadGateway, map[string]string{"message": fmt.Sprintf("%v: %s", err, string(out))})
-		return
+		return 0, "", nil, fmt.Errorf("%v: %s", err, string(out))
 	}
 	defer func() {
 		_ = exec.Command("wslc", "container", "stop", containerName).Run()
 	}()
 
-	if err := waitPort(r.Context(), port, 6*time.Second); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"message": err.Error()})
-		return
+	if err := waitPort(ctx, port, 6*time.Second); err != nil {
+		return 0, "", nil, err
 	}
 
 	rieURL := fmt.Sprintf("http://127.0.0.1:%d/2015-03-31/functions/function/invocations", port)
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, rieURL, bytes.NewReader(eventBytes))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, rieURL, bytes.NewReader(eventBytes))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"message": err.Error()})
-		return
+		return 0, "", nil, err
 	}
 	defer resp.Body.Close()
 
@@ -315,25 +348,25 @@ func (b *Bridge) handleInvoke(w http.ResponseWriter, r *http.Request, funcName s
 		status = http.StatusAccepted
 		respBytes = nil
 	}
-	b.log.Write(map[string]any{
-		"event":          "lambda_invoke",
-		"funcName":       funcName,
-		"invocationType": invType,
-		"status":         status,
-		"functionError":  fnErr,
-		"durationMs":     time.Since(started).Milliseconds(),
-	})
+	return status, fnErr, respBytes, nil
+}
 
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	} else {
-		w.Header().Set("Content-Type", "application/json")
+func detectHostLoopbackOrWSL() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
 	}
-	if fnErr != "" {
-		w.Header().Set("x-amz-function-error", fnErr)
+	for _, iface := range ifaces {
+		if strings.Contains(strings.ToLower(iface.Name), "wsl") {
+			addrs, _ := iface.Addrs()
+			for _, a := range addrs {
+				if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+					return ipNet.IP.String()
+				}
+			}
+		}
 	}
-	w.WriteHeader(status)
-	_, _ = w.Write(respBytes)
+	return ""
 }
 
 func (b *Bridge) resolveTarget(funcName string) (LambdaEntry, bool) {
