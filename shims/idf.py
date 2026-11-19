@@ -1,4 +1,9 @@
 #!/bin/sh
+# Container-side shim mounted read-only at /usr/local/bin/idf.py.
+# Forwards safe ESP-IDF subcommands (build, set-target, qemu, fullclean) to the
+# Windows host proxy ($PI_PROXY_URL/esp-idf/run) so the container can develop
+# M5Stack/ESP32 firmware using the host's ESP-IDF + QEMU without a multi-GB image.
+# Uses `node --input-type=module -` via sh so Node does not reject the `.py` extension.
 exec node --input-type=module - "$@" <<'EOF'
 const args = process.argv.slice(2);
 const sub = args[0] || "";
