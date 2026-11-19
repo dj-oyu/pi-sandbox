@@ -33,7 +33,6 @@ Windows 11 ホスト上の **Sync-Strata**（GPU 推論）と、`wslc.exe` で�
 | **汎用・M5Stack** | `pi-sandbox:latest` | `.\run-pi.ps1` | Node.js 22 / npm / Rust (cargo) / Go / uv / gcc / make / git / rg。<br>`idf.py` シム経由でホストの ESP-IDF + QEMU も利用可能。 |
 | **Web UI (Playwright)** | `pi-sandbox-web:latest` | `.\run-pi-web.ps1` | 上記 + Playwright (Chromium のみ)。`--shm-size 512m` で起動。 |
 | **AWS Emulator + Lambda** | `aws-emulator:latest` + `pi-lambda-rie:latest` | `.\run-pi-aws.ps1` | AWS 公式エミュレータ（S3/SQS/DynamoDB）＋ Lambda RIE サブコンテナ。`-Update` で上流追従。 |
-| **完全隔離 ESP-IDF** *(任意)* | `pi-sandbox-esp:latest` | `.\run-pi-esp.ps1` | コンテナ内に ESP-IDF v5.4 + QEMU を内蔵。 |
 
 ### 初回ビルドコマンド
 ```powershell
