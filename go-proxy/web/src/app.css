@@ -15,12 +15,17 @@
 * { box-sizing: border-box; }
 html, body, #app {
   height: 100%;
+  height: 100dvh;
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 12.5px;
   overflow-x: hidden;
+}
+#app {
+  display: flex;
+  flex-direction: column;
 }
 
 .topbar {
@@ -223,7 +228,7 @@ pre.term {
 .md p { margin: 4px 0; }
 .md h1, .md h2, .md h3, .md h4 { margin: 6px 0 4px; font-size: 13px; color: var(--text); }
 .md ul, .md ol { margin: 4px 0; padding-left: 18px; }
-.md code { font-family: var(--mono); font-size: 11px; background: #05080f; padding: 1px 4px; border-radius: 3px; }
+.md code { font-family: var(--mono); font-size: 11px; background: #05080f; padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; word-break: break-word; }
 .md pre { background: #05080f; border: 1px solid #1b2538; border-radius: 4px; padding: 6px 8px; overflow: auto; margin: 4px 0; }
 .md pre code { background: transparent; padding: 0; }
 .md table { margin: 4px 0; border-collapse: collapse; }
@@ -269,18 +274,23 @@ details.thinking summary { cursor: pointer; font-family: var(--mono); font-size:
     max-height: 65vh;
   }
   .files-view {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
     height: auto;
-    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-  .files-view .pane:first-child { max-height: 38dvh; }
+  .files-view .pane:first-child { max-height: 36dvh; flex-shrink: 0; }
   .files-view .pane:last-child {
-    height: calc(66dvh - env(safe-area-inset-bottom, 0px));
-    min-height: 340px;
+    flex: 1;
+    min-height: 0;
+    height: auto;
   }
   .files-view.tree-collapsed .pane:last-child {
-    height: calc(100dvh - 96px - env(safe-area-inset-bottom, 0px));
-    min-height: 400px;
+    flex: 1;
+    min-height: 0;
+    height: auto;
   }
   .form-grid { grid-template-columns: 1fr; }
 }
