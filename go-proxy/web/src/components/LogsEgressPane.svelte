@@ -30,8 +30,17 @@
   });
 
   $effect(() => {
-    if (logs.length > 0 && bodyEl && !initialScrolled) {
+    void logs.length;
+    if (!bodyEl) return;
+    if (!initialScrolled && logs.length > 0) {
       initialScrolled = true;
+      queueMicrotask(() => {
+        if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+      });
+      return;
+    }
+    const nearBottom = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 80;
+    if (nearBottom) {
       queueMicrotask(() => {
         if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
       });

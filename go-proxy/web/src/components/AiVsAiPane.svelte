@@ -20,12 +20,16 @@
 
   let {
     turns = $bindable([]),
+    running = $bindable(false),
+    errorMsg = $bindable(''),
     config,
     authVersion = 0,
     pendingAdvice = '',
     onConfigSaved
   }: {
     turns: ArenaTurn[];
+    running?: boolean;
+    errorMsg?: string;
     config: any;
     authVersion?: number;
     pendingAdvice?: string;
@@ -34,13 +38,12 @@
 
   let history = $state<ArenaMatch[]>([]);
   let selectedMatchIdx = $state(-1);
+  let initialRestored = $state(false);
 
   let showSettings = $state(false);
   let showContext = $state(false);
   let topic = $state('ローカルエージェントの検証器設計と失敗許容基準');
   let numTurns = $state(4);
-  let running = $state(false);
-  let errorMsg = $state('');
 
   let initialPrompt = $state('');
   let availableFiles = $state<string[]>([]);
@@ -90,7 +93,7 @@
 
   $effect(() => {
     void authVersion;
-    loadHistory(turns.length === 0);
+    loadHistory(!initialRestored);
     loadContext();
   });
 
@@ -123,7 +126,8 @@
     try {
       const res = await apiFetch<{ matches: ArenaMatch[] }>('/admin/arena/history');
       history = res.matches || [];
-      if (autoSelectLatest && history.length > 0 && turns.length === 0) {
+      if (autoSelectLatest && !initialRestored && history.length > 0) {
+        initialRestored = true;
         selectMatch(0);
       }
     } catch {
@@ -245,7 +249,7 @@
     errorMsg = '';
     turns = [];
     try {
-      const res = await apiFetch<{ transcript: ArenaTurn[] }>('/admin/arena/run', {
+      const res = await apiFetch<{ accepted?: boolean; transcript?: ArenaTurn[] }>('/admin/arena/run', {
         method: 'POST',
         body: JSON.stringify({
           topic,
@@ -257,12 +261,14 @@
           allowErrors
         })
       });
-      turns = res.transcript || [];
-      await loadHistory(false);
-      selectedMatchIdx = 0;
+      if (res?.transcript) {
+        turns = res.transcript;
+        running = false;
+        await loadHistory(false);
+        selectedMatchIdx = 0;
+      }
     } catch (e: any) {
       errorMsg = e.message;
-    } finally {
       running = false;
     }
   }
@@ -271,12 +277,12 @@
 <section class="pane">
   <div class="pane-head">
     <span>AI vs AI</span>
-    <div class="pane-controls">
+    <div class="pane-controls" style="gap:6px;">
       {#if history.length > 0}
         <select
           value={selectedMatchIdx}
           onchange={(e) => selectMatch(Number((e.currentTarget as HTMLSelectElement).value))}
-          style="max-width:165px;"
+          style="max-width:125px;"
           title="保存済み履歴から再生"
         >
           <option value={-1}>履歴 ({history.length})</option>
@@ -289,27 +295,28 @@
         <select
           value={saasLabel}
           onchange={(e) => activateSlot((e.currentTarget as HTMLSelectElement).value)}
-          style="max-width:130px;"
-          title="保存済み API スロット"
+          style="max-width:125px; border-color:{config?.saasKeySet ? 'rgba(34,197,94,0.5)' : 'rgba(234,179,8,0.5)'}; color:{config?.saasKeySet ? '#4ade80' : '#facc15'};"
+          title={config?.saasKeySet ? `${model || ''} (KEY SET)` : `${model || ''} (NO KEY)`}
         >
           <option value="">スロット...</option>
           {#each presets as pr}
             <option value={pr.label}>{pr.label}</option>
           {/each}
         </select>
+      {:else}
+        <span class="tag {config?.saasKeySet ? 'ok' : 'warn'}" title={config?.saasKeySet ? 'KEY SET' : 'NO KEY'}>
+          {saasLabel || model || apiFormat}
+        </span>
       {/if}
-      <span class="tag {config?.saasKeySet ? 'ok' : 'warn'}">
-        {saasLabel || apiFormat} · {model || '(未設定)'} · {config?.saasKeySet ? 'KEY SET' : 'NO KEY'}
-      </span>
-      <button class="ghost" onclick={() => { showContext = !showContext; if (showContext) loadContext(); }}>
+      <button class="ghost" onclick={() => { showContext = !showContext; if (showContext) { showSettings = false; loadContext(); } }}>
         コンテキスト ({allowedFiles.length}/{availableFiles.length}) ▾
       </button>
-      <button class="ghost" onclick={() => (showSettings = !showSettings)}>設定 ▾</button>
+      <button class="ghost" onclick={() => { showSettings = !showSettings; if (showSettings) showContext = false; }}>設定 ▾</button>
     </div>
   </div>
 
   {#if showContext}
-    <div class="inline-drawer" style="max-height:280px; overflow:auto;">
+    <div class="inline-drawer" style="max-height:calc(100% - 44px); overflow-y:auto;">
       <div class="field" style="margin-bottom:8px;">
         <label>一番初めの Pi プロンプト（相手側 System Prompt に同梱）</label>
         <textarea rows="2" bind:value={initialPrompt} placeholder="(取得中 / 任意入力)" style="width:100%;"></textarea>
@@ -344,7 +351,7 @@
   {/if}
 
   {#if showSettings}
-    <div class="inline-drawer">
+    <div class="inline-drawer" style="max-height:calc(100% - 44px); overflow-y:auto;">
       <div class="form-grid">
         <div class="field" style="grid-column: 1 / -1;">
           <label>表示ラベル / スロット名 (例: Refuseless / Claude)</label>

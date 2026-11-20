@@ -22,6 +22,7 @@ import (
 	"pi-proxy/internal/lsp"
 	"pi-proxy/internal/mcp"
 	"pi-proxy/internal/proxy"
+	"pi-proxy/internal/strata"
 )
 
 func main() {
@@ -102,12 +103,13 @@ func runServe() {
 	egressLog.SetOnWrite(func(rec map[string]any) { hub.Publish("log", map[string]any{"stream": "egress", "record": rec}) })
 	ctrlLog.SetOnWrite(func(rec map[string]any) { hub.Publish("log", map[string]any{"stream": "control", "record": rec}) })
 
-	strataSem := make(chan struct{}, c.StrataConcurrency)
+	strataQueue := strata.NewQueue(c.StrataConcurrency)
+	strataQueue.SetOnChange(func(items []strata.QueueItem) { hub.Publish("strata_queue", map[string]any{"items": items}) })
 	runner := jobs.NewRunner(c.MaxCommandWorkers)
 	runner.SetOnChange(func(j jobs.Job) { hub.Publish("job", j) })
 	monitor := health.NewMonitor(cfg, ctrlLog)
 	monitor.SetOnChange(func(targets []health.Target) { hub.Publish("health", map[string]any{"targets": targets}) })
-	arenaSvc := arena.NewService(cfg, ctrlLog, strataSem)
+	arenaSvc := arena.NewService(cfg, ctrlLog, strataQueue)
 	arenaSvc.SetHub(hub)
 	arenaSvc.SetRunner(runner)
 	lspMgr := lsp.NewManager()
@@ -147,7 +149,7 @@ func runServe() {
 
 	apiHandler := proxy.NewAPIHandler(proxy.ServerDeps{
 		Cfg: cfg, APILog: apiLog, EgressLog: egressLog, CtrlLog: ctrlLog,
-		Runner: runner, Monitor: monitor, Arena: arenaSvc, Hub: hub, LSP: lspMgr, MCP: mcpMgr, StrataSem: strataSem,
+		Runner: runner, Monitor: monitor, Arena: arenaSvc, Hub: hub, LSP: lspMgr, MCP: mcpMgr, StrataQueue: strataQueue,
 	})
 	egressHandler := proxy.NewEgressHandler(cfg, egressLog)
 

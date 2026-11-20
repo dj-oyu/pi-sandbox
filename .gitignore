@@ -5,3 +5,27 @@ pi-proxy.exe
 refs/*
 !refs/.gitkeep
 node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*secret*.json
+*token*.json
+
+# Build & local artifacts
+*.exe
+*.bin
+*.log
+*.jsonl
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

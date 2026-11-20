@@ -32,15 +32,19 @@
   let {
     strataConcurrency = $bindable(1),
     authVersion = 0,
+    logs = [],
     onConfigSaved
   }: {
     strataConcurrency: number;
     authVersion?: number;
+    logs?: Array<{ stream: string; record: Record<string, any> }>;
     onConfigSaved: () => void;
   } = $props();
 
   let sessions = $state<SessionInfo[]>([]);
   let selectedId = $state('');
+  let latestKnownId = $state('');
+  let userPinnedSession = $state(false);
   let entries = $state<SessionEntry[]>([]);
   let nextOffset = $state(-1);
   let prevCursor = $state(0);
@@ -50,6 +54,28 @@
   let sending = $state(false);
   let savingConc = $state(false);
   let streamEl: HTMLDivElement | undefined;
+
+  const displayEntries = $derived.by(() => {
+    if (entries.length === 0) return entries;
+    const minTs = entries[0]?.timestamp || '';
+    const maxTs = entries[entries.length - 1]?.timestamp || '';
+    const injected: SessionEntry[] = logs
+      .filter((x) => x.stream === 'control' && x.record?.event === 'advice_injected' && x.record?.ts)
+      .filter((x) => {
+        const ts = String(x.record.ts);
+        if (minTs && ts < minTs) return false;
+        if (hasMore && maxTs && ts > maxTs) return false;
+        return true;
+      })
+      .map((x, idx) => ({
+        id: `adv-${x.record.ts}-${idx}`,
+        timestamp: String(x.record.ts),
+        kind: 'advice',
+        text: String(x.record.text || `[External AI Advice injected (${x.record.len || 0} chars)]`)
+      }));
+    if (injected.length === 0) return entries;
+    return [...entries, ...injected].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  });
 
   function prettyArgs(raw: string): string {
     try {
@@ -63,9 +89,14 @@
     try {
       const data = await apiFetch<{ sessions: SessionInfo[] }>('/admin/pi/sessions');
       sessions = data.sessions || [];
-      if (!selectedId && sessions.length > 0) {
-        selectedId = sessions[0].id;
-        await loadInitial(selectedId);
+      if (sessions.length > 0) {
+        const newest = sessions[0].id;
+        const newSessionAppeared = newest !== latestKnownId;
+        latestKnownId = newest;
+        if (!selectedId || (newSessionAppeared && !userPinnedSession)) {
+          selectedId = newest;
+          await loadInitial(selectedId);
+        }
       }
     } catch {
       // ignore when unauthenticated
@@ -188,12 +219,13 @@
 
   $effect(() => {
     void authVersion;
+    userPinnedSession = false;
     refreshSessionList();
   });
 
   onMount(() => {
     const t1 = setInterval(pollNew, 2000);
-    const t2 = setInterval(refreshSessionList, 10000);
+    const t2 = setInterval(refreshSessionList, 3000);
     return () => {
       clearInterval(t1);
       clearInterval(t2);
@@ -207,7 +239,7 @@
     <div class="pane-controls">
       <select
         bind:value={selectedId}
-        onchange={() => loadInitial(selectedId)}
+        onchange={() => { userPinnedSession = selectedId !== latestKnownId; loadInitial(selectedId); }}
         style="max-width:190px;"
       >
         {#if sessions.length === 0}
@@ -233,13 +265,13 @@
         </div>
       {/if}
 
-      {#if entries.length === 0}
+      {#if displayEntries.length === 0}
         <div class="sub">Pi セッションログ待機中...</div>
       {:else}
-        {#each entries as item (item.id + item.timestamp)}
-          <div class="msg {item.kind === 'assistant' ? 'strata' : item.isError ? 'err' : 'user'}">
+        {#each displayEntries as item (item.id + item.timestamp)}
+          <div class="msg {item.kind === 'assistant' || item.kind === 'advice' ? 'strata' : item.isError ? 'err' : 'user'}">
             <div class="mhead">
-              <span>{item.kind === 'toolResult' ? `TOOL RESULT · ${item.toolName || ''}${item.isError ? ' · ERROR' : ''}` : item.kind.toUpperCase()}</span>
+              <span>{item.kind === 'advice' ? 'ADVICE INJECTED' : item.kind === 'toolResult' ? `TOOL RESULT · ${item.toolName || ''}${item.isError ? ' · ERROR' : ''}` : item.kind.toUpperCase()}</span>
               <span>· {shortTime(item.timestamp)}</span>
               {#if item.usage?.output}<span>· out:{item.usage.output}</span>{/if}
             </div>

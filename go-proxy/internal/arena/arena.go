@@ -18,6 +18,7 @@ import (
 	"pi-proxy/internal/fsview"
 	"pi-proxy/internal/jobs"
 	"pi-proxy/internal/sessions"
+	"pi-proxy/internal/strata"
 )
 
 type Message struct {
@@ -37,7 +38,7 @@ type ArenaTurn struct {
 type Service struct {
 	cfg           *config.Store
 	log           *binlog.Logger
-	strataSem     chan struct{}
+	strataQueue   *strata.Queue
 	hub           *events.Hub
 	runner        *jobs.Runner
 	adviceMu      sync.Mutex
@@ -98,8 +99,8 @@ func (s *Service) HandleAdvice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func NewService(cfg *config.Store, log *binlog.Logger, strataSem chan struct{}) *Service {
-	return &Service{cfg: cfg, log: log, strataSem: strataSem}
+func NewService(cfg *config.Store, log *binlog.Logger, strataQueue *strata.Queue) *Service {
+	return &Service{cfg: cfg, log: log, strataQueue: strataQueue}
 }
 
 func (s *Service) SetHub(h *events.Hub) {
@@ -248,45 +249,58 @@ func (s *Service) HandleArenaRun(w http.ResponseWriter, r *http.Request) {
 	strataMsgs := []Message{{Role: "system", Content: fullStrataSystem}, {Role: "user", Content: "Topic: " + req.Topic}}
 	saasMsgs := []Message{{Role: "system", Content: fullSaaSSystem}}
 
-	var transcript []ArenaTurn
-	for i := 1; i <= req.Turns; i++ {
-		if i%2 == 1 {
-			reply, filesRead, errsRead, err := s.callModelWithTools(r.Context(), c, "openai", strataURL, "", req.StrataModel, strataMsgs, allowedSet, req.AllowErrors, true)
-			if err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "transcript": transcript})
-				return
-			}
-			turn := ArenaTurn{Turn: i, Speaker: "strata", Model: req.StrataModel, Content: reply, FilesRead: filesRead, ErrorsRead: errsRead}
-			transcript = append(transcript, turn)
-			if s.hub != nil {
-				s.hub.Publish("arena_turn", map[string]any{"topic": req.Topic, "turn": turn})
-			}
-			strataMsgs = append(strataMsgs, Message{Role: "assistant", Content: reply})
-			saasMsgs = append(saasMsgs, Message{Role: "user", Content: reply})
-		} else {
-			reply, filesRead, errsRead, err := s.callModelWithTools(r.Context(), c, saasFormat, req.SaaSBaseURL, req.SaaSAPIKey, req.SaaSModel, saasMsgs, allowedSet, req.AllowErrors, false)
-			if err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "transcript": transcript})
-				return
-			}
-			turn := ArenaTurn{Turn: i, Speaker: "saas", Model: req.SaaSModel, Content: reply, FilesRead: filesRead, ErrorsRead: errsRead}
-			transcript = append(transcript, turn)
-			if s.hub != nil {
-				s.hub.Publish("arena_turn", map[string]any{"topic": req.Topic, "turn": turn})
-			}
-			saasMsgs = append(saasMsgs, Message{Role: "assistant", Content: reply})
-			strataMsgs = append(strataMsgs, Message{Role: "user", Content: reply})
-		}
-	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
 
-	s.log.Write(map[string]any{
-		"event":      "arena_match",
-		"topic":      req.Topic,
-		"turns":      len(transcript),
-		"saasModel":  req.SaaSModel,
-		"transcript": transcript,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"topic": req.Topic, "transcript": transcript})
+		var transcript []ArenaTurn
+		for i := 1; i <= req.Turns; i++ {
+			if i%2 == 1 {
+				reply, filesRead, errsRead, err := s.callModelWithTools(bgCtx, c, "openai", strataURL, "", req.StrataModel, strataMsgs, allowedSet, req.AllowErrors, true)
+				if err != nil {
+					if s.hub != nil {
+						s.hub.Publish("arena_error", map[string]any{"topic": req.Topic, "error": err.Error()})
+					}
+					return
+				}
+				turn := ArenaTurn{Turn: i, Speaker: "strata", Model: req.StrataModel, Content: reply, FilesRead: filesRead, ErrorsRead: errsRead}
+				transcript = append(transcript, turn)
+				if s.hub != nil {
+					s.hub.Publish("arena_turn", map[string]any{"topic": req.Topic, "turn": turn})
+				}
+				strataMsgs = append(strataMsgs, Message{Role: "assistant", Content: reply})
+				saasMsgs = append(saasMsgs, Message{Role: "user", Content: reply})
+			} else {
+				reply, filesRead, errsRead, err := s.callModelWithTools(bgCtx, c, saasFormat, req.SaaSBaseURL, req.SaaSAPIKey, req.SaaSModel, saasMsgs, allowedSet, req.AllowErrors, false)
+				if err != nil {
+					if s.hub != nil {
+						s.hub.Publish("arena_error", map[string]any{"topic": req.Topic, "error": err.Error()})
+					}
+					return
+				}
+				turn := ArenaTurn{Turn: i, Speaker: "saas", Model: req.SaaSModel, Content: reply, FilesRead: filesRead, ErrorsRead: errsRead}
+				transcript = append(transcript, turn)
+				if s.hub != nil {
+					s.hub.Publish("arena_turn", map[string]any{"topic": req.Topic, "turn": turn})
+				}
+				saasMsgs = append(saasMsgs, Message{Role: "assistant", Content: reply})
+				strataMsgs = append(strataMsgs, Message{Role: "user", Content: reply})
+			}
+		}
+
+		s.log.Write(map[string]any{
+			"event":      "arena_match",
+			"topic":      req.Topic,
+			"turns":      len(transcript),
+			"saasModel":  req.SaaSModel,
+			"transcript": transcript,
+		})
+		if s.hub != nil {
+			s.hub.Publish("arena_done", map[string]any{"topic": req.Topic, "turns": len(transcript)})
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "topic": req.Topic})
 }
 
 func (s *Service) HandleArenaHistory(w http.ResponseWriter, r *http.Request) {
@@ -318,13 +332,12 @@ func (s *Service) HandleUI(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) callChat(ctx context.Context, endpoint, apiKey, model string, messages []Message, useStrataSem bool) (string, error) {
-	if useStrataSem && s.strataSem != nil {
-		select {
-		case s.strataSem <- struct{}{}:
-			defer func() { <-s.strataSem }()
-		case <-ctx.Done():
-			return "", ctx.Err()
+	if useStrataSem && s.strataQueue != nil {
+		release, err := s.strataQueue.Acquire(ctx, "chat", model)
+		if err != nil {
+			return "", err
 		}
+		defer release()
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"model":    model,
@@ -339,7 +352,7 @@ func (s *Service) callChat(ctx context.Context, endpoint, apiKey, model string, 
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 300 * time.Second}).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -671,13 +684,13 @@ func (s *Service) callModelWithTools(ctx context.Context, c config.RuntimeConfig
 }
 
 func (s *Service) doModelRequest(ctx context.Context, c config.RuntimeConfig, format, endpoint, apiKey string, bodyMap map[string]any, useStrataSem bool) ([]byte, error) {
-	if useStrataSem && s.strataSem != nil {
-		select {
-		case s.strataSem <- struct{}{}:
-			defer func() { <-s.strataSem }()
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	if useStrataSem && s.strataQueue != nil {
+		mdl, _ := bodyMap["model"].(string)
+		release, err := s.strataQueue.Acquire(ctx, "arena", mdl)
+		if err != nil {
+			return nil, err
 		}
+		defer release()
 	}
 	payload, _ := json.Marshal(bodyMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -713,7 +726,7 @@ func (s *Service) doModelRequest(ctx context.Context, c config.RuntimeConfig, fo
 			req.Header.Set(k, v)
 		}
 	}
-	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 300 * time.Second}).Do(req)
 	if err != nil {
 		return nil, err
 	}

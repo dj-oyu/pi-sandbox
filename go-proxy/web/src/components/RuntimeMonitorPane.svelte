@@ -21,15 +21,26 @@
     stderr?: string;
   }
 
+  interface QueueItem {
+    id: string;
+    source: string;
+    model?: string;
+    status: string;
+    queuedAt: string;
+    startedAt?: string;
+  }
+
   let {
     targets = [],
     jobs = [],
+    strataQueue = [],
     autoHeal = $bindable(true),
     healthIntervalSec = $bindable(10),
     onConfigSaved
   }: {
     targets: HealthTarget[];
     jobs: Job[];
+    strataQueue?: QueueItem[];
     autoHeal: boolean;
     healthIntervalSec: number;
     onConfigSaved: () => void;
@@ -71,9 +82,13 @@
     </div>
   </div>
   <div class="pane-body">
-    <table style="margin-bottom: 10px;">
+    <div class="sec-label">SIDECARS</div>
+    <table class="fixed-cols" style="margin-bottom: 8px;">
+      <colgroup>
+        <col style="width:24%;" /><col style="width:18%;" /><col style="width:24%;" /><col style="width:17%;" /><col style="width:17%;" />
+      </colgroup>
       <thead>
-        <tr><th>Sidecar</th><th>State</th><th>Fails</th><th>Heals</th><th>Last Check</th></tr>
+        <tr><th>Target</th><th>State</th><th>Fails</th><th>Heals</th><th>Last Check</th></tr>
       </thead>
       <tbody>
         {#if targets.length === 0}
@@ -96,7 +111,38 @@
       </tbody>
     </table>
 
-    <table>
+    <div class="sec-label">STRATA GPU QUEUE</div>
+    <table class="fixed-cols" style="margin-bottom: 8px;">
+      <colgroup>
+        <col style="width:24%;" /><col style="width:18%;" /><col style="width:24%;" /><col style="width:17%;" /><col style="width:17%;" />
+      </colgroup>
+      <thead>
+        <tr><th>ID</th><th>Source</th><th>Status</th><th>Queued</th><th>Started</th></tr>
+      </thead>
+      <tbody>
+        {#if strataQueue.length === 0}
+          <tr><td colspan="5" class="sub">GPU キュー空（待機・推論中なし）</td></tr>
+        {:else}
+          {#each strataQueue as q}
+            <tr>
+              <td><code>{q.id}</code></td>
+              <td><code>{q.source}</code></td>
+              <td>
+                <span class="tag {q.status === 'running' ? 'ok' : 'warn'}">{q.status.toUpperCase()}</span>
+              </td>
+              <td class="sub">{shortTime(q.queuedAt)}</td>
+              <td class="sub">{q.startedAt ? shortTime(q.startedAt) : '-'}</td>
+            </tr>
+          {/each}
+        {/if}
+      </tbody>
+    </table>
+
+    <div class="sec-label">PARALLEL JOBS</div>
+    <table class="fixed-cols">
+      <colgroup>
+        <col style="width:24%;" /><col style="width:18%;" /><col style="width:24%;" /><col style="width:17%;" /><col style="width:17%;" />
+      </colgroup>
       <thead>
         <tr><th>Job ID</th><th>Kind</th><th>Command</th><th>Status</th><th>Time</th></tr>
       </thead>

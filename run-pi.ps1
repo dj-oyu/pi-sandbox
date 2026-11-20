@@ -83,8 +83,8 @@ if ($Model -eq "auto") {
     }
 }
 
-# Generate per-session token and runtime models.json
-$token = [Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Maximum 256 }))
+# Generate per-session token (or reuse preset PI_PROXY_TOKEN) and runtime models.json
+$token = if ($env:PI_PROXY_TOKEN) { $env:PI_PROXY_TOKEN } else { [Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Maximum 256 })) }
 $runtimeModels = Join-Path $SandboxDir ".runtime-models.json"
 (Get-Content (Join-Path $SandboxDir "models.json") -Raw).Replace("__WSL_HOST_IP__", $wslIp).Replace("__STRATA_MODEL_ID__", $Model) |
     Set-Content -Path $runtimeModels -Encoding UTF8
@@ -143,6 +143,7 @@ if ($proxyProc.HasExited) {
 }
 
 Write-Host "[pi-sandbox] Host IP: $wslIp | Logs: $LogsDir" -ForegroundColor Cyan
+Write-Host "[pi-sandbox] Control UI: http://127.0.0.1:18080/admin/ui/?token=$([uri]::EscapeDataString($token))" -ForegroundColor Green
 Write-Host "[pi-sandbox] Workspace: $Workspace -> /workspace (rw)" -ForegroundColor Cyan
 Write-Host "[pi-sandbox] Refs:      $RefsDir -> /refs (ro)" -ForegroundColor Cyan
 

@@ -16,6 +16,7 @@
   let config = $state<any>(null);
   let targets = $state<any[]>([]);
   let jobs = $state<any[]>([]);
+  let strataQueue = $state<any[]>([]);
   let logs = $state<LogItem[]>([]);
   let arenaTurns = $state<ArenaTurn[]>([]);
 
@@ -24,15 +25,18 @@
   let strataConcurrency = $state(1);
   let authVersion = $state(0);
   let pendingAdvice = $state('');
+  let arenaRunning = $state(false);
+  let arenaError = $state('');
 
   let es: EventSource | null = null;
 
   async function loadInitialState() {
     try {
-      const [cfg, healthRes, jobsRes, logsRes, advRes] = await Promise.all([
+      const [cfg, healthRes, jobsRes, queueRes, logsRes, advRes] = await Promise.all([
         apiFetch('/admin/config'),
         apiFetch('/admin/health'),
         apiFetch('/admin/jobs'),
+        apiFetch('/admin/strata/queue'),
         apiFetch('/admin/logs/recent?stream=all&tail=80'),
         apiFetch<{ pending: string }>('/admin/arena/advice')
       ]);
@@ -42,6 +46,7 @@
       strataConcurrency = cfg.strataConcurrency || 1;
       targets = healthRes.targets || [];
       jobs = jobsRes.jobs || [];
+      strataQueue = queueRes?.items || [];
       logs = logsRes.items || [];
       pendingAdvice = advRes?.pending || '';
     } catch {
@@ -55,8 +60,14 @@
     const nextEs = new EventSource(withTokenQuery('/admin/events'));
     es = nextEs;
 
-    nextEs.addEventListener('ready', () => {
+    nextEs.addEventListener('ready', (e: MessageEvent) => {
       sseStatus = 'connected';
+      try {
+        const d = JSON.parse(e.data);
+        if (typeof d?.tokPerSec === 'number' && d.tokPerSec > 0) {
+          strataSpeed = d.tokPerSec;
+        }
+      } catch {}
     });
     nextEs.onerror = () => {
       sseStatus = 'error';
@@ -73,6 +84,12 @@
       try {
         const ev = JSON.parse(e.data);
         if (ev?.data?.targets) targets = ev.data.targets;
+      } catch {}
+    });
+    nextEs.addEventListener('strata_queue', (e: MessageEvent) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (Array.isArray(ev?.data?.items)) strataQueue = ev.data.items;
       } catch {}
     });
     nextEs.addEventListener('job', (e: MessageEvent) => {
@@ -105,6 +122,16 @@
         if (t && !arenaTurns.some((x) => x.turn === t.turn)) {
           arenaTurns = [...arenaTurns, t];
         }
+      } catch {}
+    });
+    nextEs.addEventListener('arena_done', () => {
+      arenaRunning = false;
+    });
+    nextEs.addEventListener('arena_error', (e: MessageEvent) => {
+      arenaRunning = false;
+      try {
+        const ev = JSON.parse(e.data);
+        arenaError = ev?.data?.error || 'Arena error';
       } catch {}
     });
     nextEs.addEventListener('advice', (e: MessageEvent) => {
@@ -185,6 +212,7 @@
     <RuntimeMonitorPane
       {targets}
       {jobs}
+      {strataQueue}
       bind:autoHeal
       bind:healthIntervalSec
       onConfigSaved={loadInitialState}
@@ -192,6 +220,7 @@
     <PiConsolePane
       bind:strataConcurrency
       {authVersion}
+      {logs}
       onConfigSaved={loadInitialState}
     />
     <LogsEgressPane
@@ -201,6 +230,8 @@
     />
     <AiVsAiPane
       bind:turns={arenaTurns}
+      bind:running={arenaRunning}
+      bind:errorMsg={arenaError}
       {config}
       {authVersion}
       {pendingAdvice}

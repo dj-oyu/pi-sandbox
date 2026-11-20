@@ -26,7 +26,18 @@
   let copied = $state(false);
   let lspNote = $state('');
   let mobileHoverMd = $state('');
+  let treeCollapsed = $state(false);
+  let lastCursorPos = 0;
   let editorHost: HTMLDivElement | undefined;
+
+  let showGH = $state(false);
+  let ghStatus = $state<{ isRepo?: boolean; branch?: string; originUrl?: string; dirtyCount?: number; ghUser?: string } | null>(null);
+  let repoName = $state('');
+  let repoVis = $state<'private' | 'public'>('private');
+  let prTitle = $state('');
+  let prBase = $state('main');
+  let ghBusy = $state(false);
+  let ghMsg = $state('');
 
   let view: EditorView | null = null;
   const langConf = new Compartment();
@@ -137,18 +148,34 @@
         lspHover,
         EditorView.domEventHandlers({
           click(e, v) {
+            const pos = v.posAtCoords({ x: e.clientX, y: e.clientY });
+            if (pos !== null) {
+              lastCursorPos = pos;
+              v.dispatch({ selection: { anchor: pos } });
+            }
             if (e.ctrlKey || e.metaKey) {
-              const pos = v.posAtCoords({ x: e.clientX, y: e.clientY });
               if (pos !== null) {
                 e.preventDefault();
                 jumpToDefinitionAt(pos);
               }
+            }
+          },
+          pointerup(e, v) {
+            const pos = v.posAtCoords({ x: e.clientX, y: e.clientY });
+            if (pos !== null) lastCursorPos = pos;
+          },
+          touchend(e, v) {
+            const t = e.changedTouches?.[0];
+            if (t) {
+              const pos = v.posAtCoords({ x: t.clientX, y: t.clientY });
+              if (pos !== null) lastCursorPos = pos;
             }
           }
         }),
         EditorView.theme({
           '&': { height: '100%', backgroundColor: '#090d16', fontSize: '12px' },
           '.cm-scroller': { fontFamily: 'var(--mono)' },
+          '.cm-content': { paddingBottom: 'calc(56px + env(safe-area-inset-bottom, 0px))' },
           '.cm-gutters': { backgroundColor: '#0f1522', borderRight: '1px solid #243047' },
           '.cm-tooltip': { backgroundColor: '#0b101b', border: '1px solid #38bdf8', borderRadius: '4px' }
         })
@@ -177,6 +204,10 @@
     showRawMd = false;
     mobileHoverMd = '';
     lspNote = '';
+    lastCursorPos = 0;
+    if (typeof window !== 'undefined' && window.innerWidth <= 1000) {
+      treeCollapsed = true;
+    }
     if (!view) initEditor();
     if (view) {
       view.dispatch({
@@ -205,34 +236,131 @@
     }
   }
 
+  function captureDomSelectionPos(): number {
+    if (!view) return lastCursorPos;
+    try {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && sel.anchorNode && view.contentDOM.contains(sel.anchorNode)) {
+        const pos = view.posAtDOM(sel.anchorNode, sel.anchorOffset);
+        if (typeof pos === 'number' && pos >= 0 && pos <= view.state.doc.length) {
+          lastCursorPos = pos;
+          return pos;
+        }
+      }
+    } catch {
+      // ignore DOM mapping errors
+    }
+    const cmHead = view.state.selection.main.head;
+    if (cmHead > 0) {
+      lastCursorPos = cmHead;
+    }
+    return Math.min(lastCursorPos, view.state.doc.length);
+  }
+
   async function inspectHoverAtCursor() {
     if (!view || !activePath) return;
-    const pos = view.state.selection.main.head;
+    const pos = captureDomSelectionPos();
     const { line, character } = posToLsp(view.state.doc, pos);
-    const res = await apiFetch<{ found: boolean; contents: string }>('/admin/lsp/hover', {
-      method: 'POST',
-      body: JSON.stringify({ path: activePath, line, character })
-    });
-    mobileHoverMd = res.found && res.contents ? res.contents : '型情報なし';
+    mobileHoverMd = `型情報を取得中... (L${line + 1}:${character + 1})`;
+    try {
+      const res = await apiFetch<{ found: boolean; contents: string; error?: string }>('/admin/lsp/hover', {
+        method: 'POST',
+        body: JSON.stringify({ path: activePath, line, character })
+      });
+      if (res.error) {
+        mobileHoverMd = `LSP error: ${res.error}`;
+      } else {
+        mobileHoverMd = res.found && res.contents ? res.contents : `型情報なし (L${line + 1}:${character + 1})`;
+      }
+    } catch (e: any) {
+      mobileHoverMd = `LSP error: ${e?.message || e}`;
+    }
   }
 
   function jumpAtCursor() {
     if (!view || !activePath) return;
-    jumpToDefinitionAt(view.state.selection.main.head);
+    const pos = captureDomSelectionPos();
+    jumpToDefinitionAt(pos);
+  }
+
+  async function loadGHStatus() {
+    try {
+      ghStatus = await apiFetch('/admin/github/status');
+    } catch (e: any) {
+      ghMsg = e.message;
+    }
+  }
+
+  async function createGHRepo() {
+    if (!repoName.trim() || ghBusy) return;
+    ghBusy = true;
+    ghMsg = '';
+    try {
+      const res = await apiFetch<{ output: string; status: any }>('/admin/github/create-repo', {
+        method: 'POST',
+        body: JSON.stringify({ name: repoName.trim(), visibility: repoVis })
+      });
+      ghStatus = res.status;
+      ghMsg = res.output || 'リポジトリ作成＆Push 完了';
+    } catch (e: any) {
+      ghMsg = `Error: ${e.message}`;
+    } finally {
+      ghBusy = false;
+    }
+  }
+
+  async function pushGH() {
+    if (ghBusy) return;
+    ghBusy = true;
+    ghMsg = '';
+    try {
+      const res = await apiFetch<{ output: string; status: any }>('/admin/github/push', { method: 'POST' });
+      ghStatus = res.status;
+      ghMsg = res.output || 'Push 完了';
+    } catch (e: any) {
+      ghMsg = `Error: ${e.message}`;
+    } finally {
+      ghBusy = false;
+    }
+  }
+
+  async function createGHPR() {
+    if (!prTitle.trim() || ghBusy) return;
+    ghBusy = true;
+    ghMsg = '';
+    try {
+      const res = await apiFetch<{ output: string }>('/admin/github/pr', {
+        method: 'POST',
+        body: JSON.stringify({ title: prTitle.trim(), base: prBase.trim(), body: '' })
+      });
+      ghMsg = res.output || 'PR 作成完了';
+      prTitle = '';
+    } catch (e: any) {
+      ghMsg = `Error: ${e.message}`;
+    } finally {
+      ghBusy = false;
+    }
+  }
+
+  function handleDocSelectionChange() {
+    captureDomSelectionPos();
   }
 
   onMount(() => {
     initEditor();
     loadTree();
+    document.addEventListener('selectionchange', handleDocSelectionChange);
   });
 
   onDestroy(() => {
+    document.removeEventListener('selectionchange', handleDocSelectionChange);
     view?.destroy();
     view = null;
   });
 </script>
 
-<div class="files-view">
+<div class="files-view" class:tree-collapsed={treeCollapsed}>
+  {#if !treeCollapsed}
   <section class="pane">
     <div class="pane-head">
       <span>Workspace Files</span>
@@ -241,6 +369,7 @@
           <input type="checkbox" bind:checked={includeHidden} onchange={loadTree} /> .git/deps
         </label>
         <button class="ghost" onclick={loadTree}>更新</button>
+        <button class="ghost" onclick={() => (treeCollapsed = true)} title="ツリーを折りたたむ">◀ 畳む</button>
       </div>
     </div>
     <div style="padding:6px 8px; border-bottom:1px solid var(--border);">
@@ -256,10 +385,16 @@
       {/if}
     </div>
   </section>
+  {/if}
 
   <section class="pane">
     <div class="pane-head">
-      <span class="mono">{activePath || '(未選択)'}</span>
+      <div class="row" style="gap:6px;">
+        <button class="ghost" onclick={() => (treeCollapsed = !treeCollapsed)} title="ファイルツリーを開閉">
+          {treeCollapsed ? '▶ ツリー' : '◀'}
+        </button>
+        <span class="mono">{activePath || '(未選択)'}</span>
+      </div>
       <div class="pane-controls">
         {#if lspNote}
           <span class="sub">{lspNote}</span>
@@ -270,15 +405,53 @@
               {showRawMd ? 'Preview' : 'Raw'}
             </button>
           {:else}
-            <button class="ghost" onclick={inspectHoverAtCursor} title="カーソル位置の型情報">型</button>
-            <button class="ghost" onclick={jumpAtCursor} title="カーソル位置の定義へジャンプ">定義</button>
+            <button class="ghost" onpointerdown={captureDomSelectionPos} onclick={inspectHoverAtCursor} title="カーソル位置の型情報">型</button>
+            <button class="ghost" onpointerdown={captureDomSelectionPos} onclick={jumpAtCursor} title="カーソル位置の定義へジャンプ">定義</button>
           {/if}
           <button class="ghost" onclick={copyPiPath} title="/workspace/パスをコピー">
             {copied ? 'Copied!' : 'Pathコピー'}
           </button>
         {/if}
+        <button class="ghost" onclick={() => { showGH = !showGH; if (showGH) loadGHStatus(); }}>
+          GitHub ▾
+        </button>
       </div>
     </div>
+    {#if showGH}
+      <div class="inline-drawer">
+        <div class="row" style="justify-content:space-between; margin-bottom:6px;">
+          <span class="sub">
+            gh: <strong>{ghStatus?.ghUser || '(checking)'}</strong> ·
+            branch: <code>{ghStatus?.branch || '-'}</code> ·
+            origin: <code>{ghStatus?.originUrl || '(none)'}</code>
+            {#if ghStatus?.dirtyCount} · dirty: {ghStatus.dirtyCount}{/if}
+          </span>
+          <button class="ghost" onclick={loadGHStatus} disabled={ghBusy}>再読込</button>
+        </div>
+        {#if !ghStatus?.originUrl}
+          <div class="row" style="margin-bottom:6px;">
+            <input class="mono" bind:value={repoName} placeholder="new-repo-name" style="width:190px;" />
+            <select bind:value={repoVis}>
+              <option value="private">Private</option>
+              <option value="public">Public</option>
+            </select>
+            <button onclick={createGHRepo} disabled={ghBusy || !repoName.trim()}>
+              {ghBusy ? '処理中...' : 'リポジトリ作成 & Push'}
+            </button>
+          </div>
+        {:else}
+          <div class="row" style="margin-bottom:6px;">
+            <button onclick={pushGH} disabled={ghBusy}>{ghBusy ? 'Push中...' : 'git push'}</button>
+            <input bind:value={prTitle} placeholder="PR タイトル..." style="flex:1; min-width:160px;" />
+            <input class="mono" bind:value={prBase} placeholder="base (main)" style="width:90px;" />
+            <button class="ghost" onclick={createGHPR} disabled={ghBusy || !prTitle.trim()}>PR 作成</button>
+          </div>
+        {/if}
+        {#if ghMsg}
+          <div class="sub" style="word-break:break-all;">{ghMsg}</div>
+        {/if}
+      </div>
+    {/if}
     {#if mobileHoverMd}
       <div class="inline-drawer" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
         <div class="md lsp-hover" style="flex:1;">{@html renderMarkdown(mobileHoverMd)}</div>
