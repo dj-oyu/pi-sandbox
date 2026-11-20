@@ -281,7 +281,7 @@ details.thinking summary { cursor: pointer; font-family: var(--mono); font-size:
     height: auto;
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-  .files-view .pane:first-child { max-height: 36dvh; flex-shrink: 0; }
+  .files-view:not(.tree-collapsed) .pane:first-child { max-height: 36dvh; flex-shrink: 0; }
   .files-view .pane:last-child {
     flex: 1;
     min-height: 0;
@@ -291,6 +291,7 @@ details.thinking summary { cursor: pointer; font-family: var(--mono); font-size:
     flex: 1;
     min-height: 0;
     height: auto;
+    max-height: none;
   }
   .form-grid { grid-template-columns: 1fr; }
 }
