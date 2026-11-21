@@ -6,9 +6,10 @@
   import LogsEgressPane, { type LogItem } from './components/LogsEgressPane.svelte';
   import AiVsAiPane, { type ArenaTurn } from './components/AiVsAiPane.svelte';
   import FilesView from './components/FilesView.svelte';
+  import DreamView from './components/DreamView.svelte';
   import McpView from './components/McpView.svelte';
 
-  let activeView = $state<'cockpit' | 'files' | 'mcp'>('cockpit');
+  let activeView = $state<'cockpit' | 'files' | 'dream' | 'mcp'>('cockpit');
   let tokenInput = $state(getToken());
   let sseStatus = $state<'connected' | 'connecting' | 'error'>('connecting');
   let strataSpeed = $state<number | null>(null);
@@ -177,6 +178,7 @@
     <div class="view-switch">
       <button class={activeView === 'cockpit' ? 'active' : ''} onclick={() => (activeView = 'cockpit')}>Cockpit</button>
       <button class={activeView === 'files' ? 'active' : ''} onclick={() => (activeView = 'files')}>Files</button>
+      <button class={activeView === 'dream' ? 'active' : ''} onclick={() => (activeView = 'dream')}>Dream</button>
       <button class={activeView === 'mcp' ? 'active' : ''} onclick={() => (activeView = 'mcp')}>MCP</button>
     </div>
     <span class="stat-inline">
@@ -240,6 +242,8 @@
   </div>
 {:else if activeView === 'files'}
   <FilesView />
+{:else if activeView === 'dream'}
+  <DreamView />
 {:else}
   <McpView />
 {/if}

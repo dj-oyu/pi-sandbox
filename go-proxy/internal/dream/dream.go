@@ -21,13 +21,66 @@ type EventSummary struct {
 	Reason         string   `json:"reason,omitempty"`
 }
 
+type MemoryEntry struct {
+	ID          string `json:"id"`
+	Tier        string `json:"tier"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	RecallCount int    `json:"recallCount"`
+}
+
 type MemorySummary struct {
 	Exists       bool           `json:"exists"`
 	Path         string         `json:"path"`
 	Bytes        int            `json:"bytes"`
 	TotalEntries int            `json:"totalEntries"`
 	Tiers        map[string]int `json:"tiers"`
+	Entries      []MemoryEntry  `json:"entries"`
 	BloatWarning bool           `json:"bloatWarning"`
+}
+
+type VerifyPoint struct {
+	Ts        string  `json:"ts"`
+	Score     float64 `json:"score"`
+	TargetMet bool    `json:"targetMet"`
+}
+
+type JudgeRecall struct {
+	Turn   int    `json:"turn"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+type JudgeMemory struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+}
+
+type JudgeResult struct {
+	Available bool          `json:"available"`
+	Model     string        `json:"model,omitempty"`
+	Verdict   string        `json:"verdict,omitempty"`
+	Summary   string        `json:"summary,omitempty"`
+	Recalls   []JudgeRecall `json:"recalls,omitempty"`
+	Memory    []JudgeMemory `json:"memory,omitempty"`
+	Error     string        `json:"error,omitempty"`
+}
+
+type EvalSummary struct {
+	Ts           string       `json:"ts"`
+	RunID        string       `json:"runId"`
+	DreamEnabled bool         `json:"dreamEnabled"`
+	HasVerifier  bool         `json:"hasVerifier"`
+	TotalTurns   int          `json:"totalTurns"`
+	Writes       int          `json:"writes"`
+	Recalls      int          `json:"recalls"`
+	Overhead     float64      `json:"overheadRatio"`
+	FinalScore   *float64     `json:"finalScore,omitempty"`
+	TargetMet    bool         `json:"targetMet"`
+	Verdict      string       `json:"verdict"`
+	Reasons      []string     `json:"reasons,omitempty"`
+	Judge        *JudgeResult `json:"judge,omitempty"`
 }
 
 type StatusResponse struct {
@@ -49,6 +102,9 @@ type StatusResponse struct {
 	TargetMet       bool           `json:"targetMet"`
 	Memory          MemorySummary  `json:"memory"`
 	RecentEvents    []EventSummary `json:"recentEvents"`
+	VerifyPoints    []VerifyPoint  `json:"verifyPoints"`
+	LatestEval      *EvalSummary   `json:"latestEval,omitempty"`
+	RecentEvals     []EvalSummary  `json:"recentEvals"`
 }
 
 type rawDreamEvent struct {
@@ -75,15 +131,16 @@ type rawVerifyEvent struct {
 	TargetMet bool     `json:"targetMet"`
 }
 
-var tierHeadingRe = regexp.MustCompile(`(?i)^###\s+\[(Principle|Insight|Dead End|Note|Epic|Nobel Prize|Genius|Insightful|Useful)\]`)
+var entryHeadingRe = regexp.MustCompile(`(?i)^###\s+\[(Principle|Insight|Dead End|Note|Epic|Nobel Prize|Genius|Insightful|Useful)\]\s*(?:([A-Za-z0-9_-]+)\s*[-—:]\s*)?(.+)$`)
 
-func readMemory(workspace, relPath string) MemorySummary {
+func readMemory(workspace, relPath string, recallCounts map[string]int) MemorySummary {
 	if relPath == "" {
 		relPath = ".pi/memory/dream.md"
 	}
 	res := MemorySummary{
-		Path:  relPath,
-		Tiers: map[string]int{},
+		Path:    relPath,
+		Tiers:   map[string]int{},
+		Entries: []MemoryEntry{},
 	}
 	if workspace == "" {
 		return res
@@ -95,11 +152,40 @@ func readMemory(workspace, relPath string) MemorySummary {
 	}
 	res.Exists = true
 	res.Bytes = len(data)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if m := tierHeadingRe.FindStringSubmatch(line); len(m) > 1 {
-			res.Tiers[m[1]]++
+	lines := strings.Split(string(data), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], "\r")
+		m := entryHeadingRe.FindStringSubmatch(line)
+		if len(m) > 3 {
+			tier := m[1]
+			id := m[2]
+			if id == "" {
+				id = "M" + string(rune('1'+len(res.Entries)))
+			}
+			title := strings.TrimSpace(m[3])
+			var bodyParts []string
+			for j := i + 1; j < len(lines) && len(bodyParts) < 3; j++ {
+				nxt := strings.TrimSpace(strings.TrimRight(lines[j], "\r"))
+				if strings.HasPrefix(nxt, "### ") || strings.HasPrefix(nxt, "## ") {
+					break
+				}
+				if nxt != "" {
+					bodyParts = append(bodyParts, nxt)
+				}
+			}
+			body := strings.Join(bodyParts, " ")
+			if len(body) > 260 {
+				body = body[:260] + "..."
+			}
+			res.Tiers[tier]++
 			res.TotalEntries++
+			res.Entries = append(res.Entries, MemoryEntry{
+				ID:          id,
+				Tier:        tier,
+				Title:       title,
+				Body:        body,
+				RecallCount: recallCounts[id],
+			})
 		}
 	}
 	res.BloatWarning = res.Bytes > 12*1024 || res.TotalEntries > 25
@@ -129,15 +215,44 @@ func readJSONL[T any](filePath string) []T {
 }
 
 func Status(sessionsDir, workspace string) StatusResponse {
+	recallCounts := map[string]int{}
 	resp := StatusResponse{
-		Memory:       readMemory(workspace, ".pi/memory/dream.md"),
+		Memory:       readMemory(workspace, ".pi/memory/dream.md", recallCounts),
 		RecentEvents: []EventSummary{},
+		VerifyPoints: []VerifyPoint{},
+		RecentEvals:  []EvalSummary{},
 	}
 	if sessionsDir == "" {
 		return resp
 	}
 	events := readJSONL[rawDreamEvent](filepath.Join(sessionsDir, "dream-metrics.jsonl"))
 	verifies := readJSONL[rawVerifyEvent](filepath.Join(sessionsDir, "verify-metrics.jsonl"))
+	evals := readJSONL[EvalSummary](filepath.Join(sessionsDir, "dream-evals.jsonl"))
+
+	// Count total recalls per memory ID across all runs (cross-session reuse!).
+	for _, ev := range events {
+		if ev.Event == "dream_recall" {
+			for _, id := range ev.PickedIds {
+				recallCounts[id]++
+			}
+		}
+	}
+
+	if len(evals) > 0 {
+		// Deduplicate by runId keeping the latest evaluation per run.
+		seen := map[string]bool{}
+		var dedup []EvalSummary
+		for i := len(evals) - 1; i >= 0 && len(dedup) < 10; i-- {
+			if seen[evals[i].RunID] {
+				continue
+			}
+			seen[evals[i].RunID] = true
+			dedup = append(dedup, evals[i])
+		}
+		resp.RecentEvals = dedup
+		latest := dedup[0]
+		resp.LatestEval = &latest
+	}
 
 	if len(verifies) > 0 {
 		lastV := verifies[len(verifies)-1]
@@ -145,10 +260,10 @@ func Status(sessionsDir, workspace string) StatusResponse {
 		resp.TargetMet = lastV.TargetMet
 	}
 	if len(events) == 0 {
+		resp.Memory = readMemory(workspace, ".pi/memory/dream.md", recallCounts)
 		return resp
 	}
 
-	// Pick latest runId from session_start (fallback to last event's runId).
 	latestRunID := ""
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Event == "session_start" && events[i].RunID != "" {
@@ -213,8 +328,24 @@ func Status(sessionsDir, workspace string) StatusResponse {
 		}
 	}
 
-	if len(resp.RecentEvents) > 8 {
-		resp.RecentEvents = resp.RecentEvents[len(resp.RecentEvents)-8:]
+	if len(resp.RecentEvents) > 12 {
+		resp.RecentEvents = resp.RecentEvents[len(resp.RecentEvents)-12:]
+	}
+
+	// Collect verify points belonging to this run (only when verifier exists).
+	if startT, err := time.Parse(time.RFC3339Nano, resp.StartedAt); err == nil {
+		for _, v := range verifies {
+			if v.Score == nil {
+				continue
+			}
+			if tv, err := time.Parse(time.RFC3339Nano, v.Ts); err == nil && !tv.Before(startT.Add(-5*time.Second)) {
+				resp.VerifyPoints = append(resp.VerifyPoints, VerifyPoint{
+					Ts:        v.Ts,
+					Score:     *v.Score,
+					TargetMet: v.TargetMet,
+				})
+			}
+		}
 	}
 
 	// Estimate next write time when Dream is enabled.
@@ -228,7 +359,6 @@ func Status(sessionsDir, workspace string) StatusResponse {
 		}
 	}
 
-	// Compute post-recall score lifts (next <=3 verify runs within 10 minutes).
 	for _, rec := range recalls {
 		if rec.ScoreBefore == nil {
 			continue
@@ -258,6 +388,15 @@ func Status(sessionsDir, workspace string) StatusResponse {
 		}
 	}
 
-	resp.Memory = readMemory(workspace, memFile)
+	// Match latestEval specifically for this run if available.
+	for i := range resp.RecentEvals {
+		if resp.RecentEvals[i].RunID == latestRunID {
+			ev := resp.RecentEvals[i]
+			resp.LatestEval = &ev
+			break
+		}
+	}
+
+	resp.Memory = readMemory(workspace, memFile, recallCounts)
 	return resp
 }
