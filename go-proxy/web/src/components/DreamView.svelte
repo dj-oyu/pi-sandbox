@@ -87,6 +87,9 @@
 
   let data = $state<DreamStatus | null>(null);
   let activeTier = $state('ALL');
+  let openTimeline = $state(true);
+  let openMemory = $state(true);
+  let openEvals = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function refresh() {
@@ -123,6 +126,13 @@
     return map;
   });
 
+  // Only show meaningful Dream events (hide noisy session_turn_final rows)
+  const dreamEvents = $derived.by(() => {
+    return (data?.recentEvents || []).filter(
+      (ev) => ev.event === 'dream_write' || ev.event === 'dream_recall' || ev.event === 'recall_followthrough'
+    );
+  });
+
   const filteredEntries = $derived.by(() => {
     const all = data?.memory?.entries || [];
     if (activeTier === 'ALL') return all;
@@ -136,7 +146,7 @@
     return pts
       .map((p, i) => {
         const x = n === 1 ? 380 : 48 + (i / (n - 1)) * 672;
-        const y = 136 - (Math.max(0, Math.min(100, p.score)) / 100) * 116;
+        const y = 94 - (Math.max(0, Math.min(100, p.score)) / 100) * 78;
         return `${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(' ');
@@ -152,9 +162,9 @@
   });
 </script>
 
-<div class="mcp-view" style="overflow:auto; padding:12px 14px; gap:12px;">
-  <!-- Top Status & Qwen Judge -->
-  <section class="pane" style="border:1px solid var(--border); border-radius:4px; overflow:visible;">
+<div class="mcp-view" style="overflow-y:auto; padding:10px 12px; gap:10px;">
+  <!-- 1. Top Status & Qwen Judge (always visible, compact) -->
+  <section class="pane" style="flex:0 0 auto; border:1px solid var(--border); border-radius:4px;">
     <div class="pane-head">
       <div class="row" style="gap:8px;">
         <span>Dream Harness</span>
@@ -162,7 +172,7 @@
           <span class="tag {data.enabled ? 'ok' : ''}">{data.enabled ? `ON · ${data.intervalMin}m` : 'OFF'}</span>
           <span class="sub">{data.runId}</span>
           {#if data.enabled && data.nextWriteAt}
-            <span class="sub">Next Write: {shortTime(data.nextWriteAt)}</span>
+            <span class="sub">Next: {shortTime(data.nextWriteAt)}</span>
           {/if}
         {/if}
       </div>
@@ -174,24 +184,24 @@
       </div>
     </div>
 
-    <div class="pane-body" style="overflow:visible;">
+    <div class="pane-body" style="overflow:visible; padding:8px 12px;">
       {#if !data || !data.hasData}
         <div class="sub">Dream ログがまだありません。<code>run-pi.ps1 -EnableDream</code> で実行するとここに表示されます。</div>
       {:else}
-        <div class="row" style="gap:16px; margin-bottom:10px;">
-          <div><div class="sub">Writes</div><div class="mono" style="font-size:15px; font-weight:700;">{data.writes}</div></div>
-          <div><div class="sub">Recalls</div><div class="mono" style="font-size:15px; font-weight:700;">{data.recalls}</div></div>
+        <div class="row" style="gap:16px; margin-bottom:8px;">
+          <div><div class="sub">Writes</div><div class="mono" style="font-size:14px; font-weight:700;">{data.writes}</div></div>
+          <div><div class="sub">Recalls</div><div class="mono" style="font-size:14px; font-weight:700;">{data.recalls}</div></div>
           <div>
             <div class="sub">Memory</div>
-            <div class="mono" style="font-size:15px; font-weight:700;">
+            <div class="mono" style="font-size:14px; font-weight:700;">
               {data.memory.totalEntries}件 <span class="sub">({formatBytes(data.memory.bytes)})</span>
               {#if data.memory.bloatWarning}<span class="tag err" style="margin-left:4px;">BLOAT</span>{/if}
             </div>
           </div>
           {#if data.verifyPoints.length > 0 || data.latestScore !== undefined}
             <div>
-              <div class="sub">Verifier Score</div>
-              <div class="mono" style="font-size:15px; font-weight:700;">
+              <div class="sub">Verifier</div>
+              <div class="mono" style="font-size:14px; font-weight:700;">
                 {data.latestScore ?? '-'}
                 {#if data.postRecallLifts > 0}<span class="tag ok" style="margin-left:4px;">+{data.postRecallLifts} lift</span>{/if}
               </div>
@@ -200,12 +210,12 @@
         </div>
 
         {#if data.latestEval?.judge?.available}
-          <div style="background:#0b111e; border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:4px; padding:8px 10px;">
-            <div class="row" style="justify-content:space-between; margin-bottom:4px;">
-              <span class="mono" style="font-weight:700; color:var(--accent);">QWEN 1-SHOT JUDGE</span>
+          <div style="background:#0b111e; border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:4px; padding:6px 10px;">
+            <div class="row" style="justify-content:space-between; margin-bottom:2px;">
+              <span class="mono" style="font-size:11px; font-weight:700; color:var(--accent);">QWEN 1-SHOT JUDGE</span>
               <span class="sub">{data.latestEval.judge.model || 'local-qwen'}</span>
             </div>
-            <div style="font-size:12.5px;">
+            <div style="font-size:12px;">
               <span class="tag {verdictClass(data.latestEval.judge.verdict)}" style="margin-right:6px;">
                 {data.latestEval.judge.verdict}
               </span>
@@ -213,91 +223,100 @@
             </div>
           </div>
         {:else}
-          <div class="sub">Qwen Judge: タスク終了時に <code>eval-dream.mjs</code> が自動で 1-shot 判定を記録します。</div>
+          <div class="sub">Qwen Judge: タスク終了時に自動で 1-shot 判定が記録されます。</div>
         {/if}
       {/if}
     </div>
   </section>
 
-  <!-- Optional Verifier Score Chart + Dream Event Log -->
-  <section class="pane" style="border:1px solid var(--border); border-radius:4px; overflow:visible;">
-    <div class="pane-head">
-      <span>Dream Timeline & Verifier</span>
+  <!-- 2. Collapsible Timeline & Dream Events -->
+  <section class="pane" style="flex:0 0 auto; border:1px solid var(--border); border-radius:4px;">
+    <div class="pane-head" style="cursor:pointer;" onclick={() => (openTimeline = !openTimeline)}>
+      <div class="row" style="gap:6px;">
+        <span class="mono">{openTimeline ? '▼' : '▶'}</span>
+        <span>Dream Timeline & Events</span>
+        <span class="tag">{dreamEvents.length} events</span>
+      </div>
       <span class="sub">
-        {data?.verifyPoints?.length ? `Verifier points: ${data.verifyPoints.length}` : '汎用モード（verifier.json なし）'}
+        {data?.verifyPoints?.length ? `Verifier: ${data.verifyPoints.length} pts` : '汎用モード'}
       </span>
     </div>
-    <div class="pane-body" style="overflow:visible;">
-      {#if data?.verifyPoints && data.verifyPoints.length > 0}
-        <div style="overflow-x:auto; margin-bottom:10px;">
-          <svg viewBox="0 0 760 154" style="width:100%; min-width:440px; max-height:170px;">
-            <g stroke="#243047" stroke-width="1" stroke-dasharray="3 3">
-              <line x1="48" y1="20" x2="720" y2="20" />
-              <line x1="48" y1="78" x2="720" y2="78" />
-              <line x1="48" y1="136" x2="720" y2="136" />
-            </g>
-            <g fill="#8494ad" font-size="11" font-family="ui-monospace, monospace" text-anchor="end">
-              <text x="40" y="24">100</text>
-              <text x="40" y="82">50</text>
-              <text x="40" y="140">0</text>
-            </g>
-            <polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" points={svgPolyline} />
-            {#each data.verifyPoints as p, i}
-              {@const x = data.verifyPoints.length === 1 ? 380 : 48 + (i / (data.verifyPoints.length - 1)) * 672}
-              {@const y = 136 - (Math.max(0, Math.min(100, p.score)) / 100) * 116}
-              <circle cx={x} cy={y} r="3.5" fill={p.targetMet ? '#22c55e' : '#38bdf8'} />
-            {/each}
-          </svg>
-        </div>
-      {/if}
+    {#if openTimeline}
+      <div class="pane-body" style="overflow:visible; padding:8px 12px;">
+        {#if data?.verifyPoints && data.verifyPoints.length > 0}
+          <div style="overflow-x:auto; margin-bottom:8px;">
+            <svg viewBox="0 0 760 112" style="width:100%; min-width:420px; max-height:112px;">
+              <g stroke="#243047" stroke-width="1" stroke-dasharray="3 3">
+                <line x1="48" y1="16" x2="720" y2="16" />
+                <line x1="48" y1="55" x2="720" y2="55" />
+                <line x1="48" y1="94" x2="720" y2="94" />
+              </g>
+              <g fill="#8494ad" font-size="10.5" font-family="ui-monospace, monospace" text-anchor="end">
+                <text x="40" y="20">100</text>
+                <text x="40" y="59">50</text>
+                <text x="40" y="98">0</text>
+              </g>
+              <polyline fill="none" stroke="#38bdf8" stroke-width="2" stroke-linejoin="round" points={svgPolyline} />
+              {#each data.verifyPoints as p, i}
+                {@const x = data.verifyPoints.length === 1 ? 380 : 48 + (i / (data.verifyPoints.length - 1)) * 672}
+                {@const y = 94 - (Math.max(0, Math.min(100, p.score)) / 100) * 78}
+                <circle cx={x} cy={y} r="3.5" fill={p.targetMet ? '#22c55e' : '#38bdf8'} />
+              {/each}
+            </svg>
+          </div>
+        {/if}
 
-      <div class="sec-label">DREAM EVENTS</div>
-      {#if !data?.recentEvents || data.recentEvents.length === 0}
-        <div class="sub">まだイベントがありません（次回チェックポイント待機中）。</div>
-      {:else}
-        <table>
-          <thead>
-            <tr><th style="width:76px;">Time</th><th style="width:120px;">Event</th><th style="width:60px;">Turn</th><th>Detail / Qwen Judge</th></tr>
-          </thead>
-          <tbody>
-            {#each [...data.recentEvents].reverse() as ev}
-              {@const jr = ev.turn ? judgeRecallMap.get(ev.turn) : undefined}
-              <tr>
-                <td class="sub">{shortTime(ev.ts)}</td>
-                <td>
-                  <span class="tag {ev.event === 'dream_recall' ? 'ok' : ev.event === 'dream_write' ? 'warn' : ''}">
-                    {ev.event}
-                  </span>
-                </td>
-                <td class="mono">{ev.turn ?? '-'}</td>
-                <td>
-                  {#if ev.pickedHeadings && ev.pickedHeadings.length > 0}
-                    <div class="mono" style="font-size:11px;">{ev.pickedHeadings.join(' / ')}</div>
-                  {:else if ev.reason}
-                    <span class="sub">{ev.reason}</span>
-                  {:else}
-                    <span class="sub">checkpoint recorded</span>
-                  {/if}
-                  {#if jr}
-                    <div style="margin-top:2px;">
-                      <span class="tag {verdictClass(jr.status)}">{jr.status}</span>
-                      <span class="sub" style="margin-left:4px;">{jr.reason}</span>
-                    </div>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-    </div>
+        {#if dreamEvents.length === 0}
+          <div class="sub">Write / Recall イベントはまだありません。</div>
+        {:else}
+          <table>
+            <thead>
+              <tr><th style="width:72px;">Time</th><th style="width:118px;">Event</th><th style="width:52px;">Turn</th><th>Detail / Qwen Judge</th></tr>
+            </thead>
+            <tbody>
+              {#each [...dreamEvents].reverse() as ev}
+                {@const jr = ev.turn ? judgeRecallMap.get(ev.turn) : undefined}
+                <tr>
+                  <td class="sub">{shortTime(ev.ts)}</td>
+                  <td>
+                    <span class="tag {ev.event === 'dream_recall' ? 'ok' : ev.event === 'dream_write' ? 'warn' : ''}">
+                      {ev.event}
+                    </span>
+                  </td>
+                  <td class="mono">{ev.turn ?? '-'}</td>
+                  <td>
+                    {#if ev.pickedHeadings && ev.pickedHeadings.length > 0}
+                      <div class="mono" style="font-size:11px;">{ev.pickedHeadings.join(' / ')}</div>
+                    {:else if ev.pickedIds && ev.pickedIds.length > 0}
+                      <div class="mono" style="font-size:11px;">refs: {ev.pickedIds.join(', ')}</div>
+                    {:else}
+                      <span class="sub">memory checkpoint</span>
+                    {/if}
+                    {#if jr}
+                      <div style="margin-top:2px;">
+                        <span class="tag {verdictClass(jr.status)}">{jr.status}</span>
+                        <span class="sub" style="margin-left:4px;">{jr.reason}</span>
+                      </div>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    {/if}
   </section>
 
-  <!-- Memory Bank + Recent Evaluations -->
-  <div class="form-grid" style="align-items:start;">
-    <section class="pane" style="border:1px solid var(--border); border-radius:4px; overflow:visible;">
-      <div class="pane-head">
+  <!-- 3. Collapsible Memory Bank -->
+  <section class="pane" style="flex:0 0 auto; border:1px solid var(--border); border-radius:4px;">
+    <div class="pane-head">
+      <div class="row" style="gap:6px; cursor:pointer;" onclick={() => (openMemory = !openMemory)}>
+        <span class="mono">{openMemory ? '▼' : '▶'}</span>
         <span>Memory Bank (<code>{data?.memory?.path || '.pi/memory/dream.md'}</code>)</span>
+        <span class="tag">{data?.memory?.totalEntries || 0}件</span>
+      </div>
+      {#if openMemory}
         <div class="pane-controls">
           {#each ['ALL', 'Principle', 'Insight', 'Dead End', 'Note'] as t}
             <button
@@ -307,16 +326,18 @@
             >{t}</button>
           {/each}
         </div>
-      </div>
-      <div class="pane-body" style="overflow:visible;">
+      {/if}
+    </div>
+    {#if openMemory}
+      <div class="pane-body" style="overflow:visible; padding:8px 12px;">
         {#if filteredEntries.length === 0}
           <div class="sub">該当するメモリエントリがありません。</div>
         {:else}
-          <div style="display:flex; flex-direction:column; gap:8px;">
+          <div style="display:flex; flex-direction:column; gap:6px;">
             {#each filteredEntries as m}
               {@const jm = judgeMemMap.get(m.id)}
-              <div style="background:#0b111e; border:1px solid var(--border); border-radius:4px; padding:8px 10px;">
-                <div class="row" style="justify-content:space-between; margin-bottom:4px;">
+              <div style="background:#0b111e; border:1px solid var(--border); border-radius:4px; padding:7px 10px;">
+                <div class="row" style="justify-content:space-between; margin-bottom:3px;">
                   <div class="row" style="gap:6px;">
                     <span class="tag {m.tier === 'Dead End' ? 'err' : m.tier === 'Principle' ? 'ok' : ''}">{m.tier}</span>
                     <strong class="mono">{m.id}</strong>
@@ -329,22 +350,32 @@
                     {/if}
                   </div>
                 </div>
-                <div class="sub" style="white-space:normal; line-height:1.45;">{m.body}</div>
+                <div class="sub" style="white-space:normal; line-height:1.4;">{m.body}</div>
                 {#if jm}
-                  <div class="sub" style="margin-top:4px; color:var(--accent);">Judge: {jm.reason}</div>
+                  <div class="sub" style="margin-top:3px; color:var(--accent);">Judge: {jm.reason}</div>
                 {/if}
               </div>
             {/each}
           </div>
         {/if}
       </div>
-    </section>
+    {/if}
+  </section>
 
-    <section class="pane" style="border:1px solid var(--border); border-radius:4px; overflow:visible;">
-      <div class="pane-head">
+  <!-- 4. Collapsible Recent Evaluations (default collapsed to save vertical space) -->
+  <section class="pane" style="flex:0 0 auto; border:1px solid var(--border); border-radius:4px;">
+    <div class="pane-head" style="cursor:pointer;" onclick={() => (openEvals = !openEvals)}>
+      <div class="row" style="gap:6px;">
+        <span class="mono">{openEvals ? '▼' : '▶'}</span>
         <span>Recent Evaluations (<code>dream-evals.jsonl</code>)</span>
+        <span class="tag">{data?.recentEvals?.length || 0} runs</span>
       </div>
-      <div class="pane-body" style="overflow:visible;">
+      {#if !openEvals && data?.recentEvals && data.recentEvals.length > 0}
+        <span class="sub">最新: {data.recentEvals[0].verdict}</span>
+      {/if}
+    </div>
+    {#if openEvals}
+      <div class="pane-body" style="overflow:visible; padding:8px 12px;">
         {#if !data?.recentEvals || data.recentEvals.length === 0}
           <div class="sub">評価履歴がまだありません。</div>
         {:else}
@@ -367,6 +398,6 @@
           </table>
         {/if}
       </div>
-    </section>
-  </div>
+    {/if}
+  </section>
 </div>
