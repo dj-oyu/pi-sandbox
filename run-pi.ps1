@@ -35,15 +35,6 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$EnableDream,
 
-    [Parameter(Mandatory = $false)]
-    [int]$DreamIntervalMin = 12,
-
-    [Parameter(Mandatory = $false)]
-    [double]$DreamRecallProb = 0.22,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$DreamConsolidate,
-
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PiArgs
 )
@@ -219,14 +210,10 @@ try {
     }
 
     $dreamRunId = "run-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N').Substring(0,6))"
-    $wslcArgs += @(
-        "-e", "PI_DREAM_RUN_ID=$dreamRunId",
-        "-e", "PI_DREAM_INTERVAL_MIN=$DreamIntervalMin",
-        "-e", "PI_DREAM_RECALL_PROB=$DreamRecallProb"
-    )
+    $wslcArgs += @("-e", "PI_DREAM_RUN_ID=$dreamRunId")
     if ($EnableDream) {
         $wslcArgs += @("-e", "PI_DREAM=1")
-        Write-Host "[pi-sandbox] Dream Harness: ON (runId=$dreamRunId, interval=${DreamIntervalMin}m, recallProb=$DreamRecallProb)" -ForegroundColor Magenta
+        Write-Host "[pi-sandbox] Dream Harness: ON (runId=$dreamRunId, hybrid vec+rand)" -ForegroundColor Magenta
     }
 
     $baseArgs = @($wslcArgs)
@@ -258,10 +245,10 @@ try {
         }
     }
 
-    # Optional post-task Dream consolidation (compress & prune .pi/memory/dream.md)
+    # Automatic post-task Dream consolidation only when .pi/memory/dream.md grows past 12 KB
     $dreamMemPath = Join-Path $Workspace ".pi\memory\dream.md"
-    if ($EnableDream -and $DreamConsolidate -and (Test-Path $dreamMemPath) -and ((Get-Item $dreamMemPath).Length -gt 4096)) {
-        Write-Host "[pi-sandbox] Running post-task Dream consolidation pass..." -ForegroundColor Magenta
+    if ($EnableDream -and (Test-Path $dreamMemPath) -and ((Get-Item $dreamMemPath).Length -gt 12288)) {
+        Write-Host "[pi-sandbox] Dream memory > 12 KB; running auto-consolidation pass..." -ForegroundColor Magenta
         $consArgs = @($baseArgs) + @(
             "-e", "PI_DREAM=0",
             $Image, "--provider", "sync-strata", "--model", $Model,
