@@ -9,6 +9,7 @@ const MAX_REFLECTS_PER_SESSION = 6;
 const MAX_RECALLS_PER_SESSION = 4;
 
 function isBossMode(cwd: string): boolean {
+  if (process.env.PI_DREAM === "1") return false;
   try {
     return fs.existsSync(path.join(cwd, ".pi", "BOSS_MODE"));
   } catch {
