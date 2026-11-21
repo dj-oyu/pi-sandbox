@@ -1,5 +1,45 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { apiFetch, shortTime } from '../lib/api';
+
+  interface DreamEvent {
+    ts: string;
+    event: string;
+    turn?: number;
+    scoreBefore?: number;
+    scoreNow?: number;
+    pickedIds?: string[];
+    pickedHeadings?: string[];
+    reason?: string;
+  }
+
+  interface DreamStatus {
+    hasData: boolean;
+    runId: string;
+    enabled: boolean;
+    intervalMin: number;
+    recallProb: number;
+    startedAt: string;
+    lastEventAt: string;
+    lastWriteAt: string;
+    nextWriteAt: string;
+    writes: number;
+    recalls: number;
+    followThroughs: number;
+    guardSkips: number;
+    postRecallLifts: number;
+    latestScore?: number;
+    targetMet: boolean;
+    memory: {
+      exists: boolean;
+      path: string;
+      bytes: number;
+      totalEntries: number;
+      tiers: Record<string, number>;
+      bloatWarning: boolean;
+    };
+    recentEvents: DreamEvent[];
+  }
 
   interface HealthTarget {
     name: string;
@@ -48,6 +88,30 @@
 
   let selectedJobId = $state('');
   let saving = $state(false);
+  let dream = $state<DreamStatus | null>(null);
+  let dreamTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function loadDream() {
+    try {
+      dream = await apiFetch<DreamStatus>('/admin/dream/status');
+    } catch {
+      // ignore transient errors
+    }
+  }
+
+  function formatBytes(n: number): string {
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${n} B`;
+  }
+
+  onMount(() => {
+    loadDream();
+    dreamTimer = setInterval(loadDream, 5000);
+  });
+
+  onDestroy(() => {
+    if (dreamTimer) clearInterval(dreamTimer);
+  });
 
   const activeJob = $derived(
     jobs.find((j) => j.id === selectedJobId) || jobs[0] || null
@@ -82,6 +146,66 @@
     </div>
   </div>
   <div class="pane-body">
+    <div class="sec-label" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>DREAM HARNESS</span>
+      {#if dream?.hasData}
+        <span class="sub" style="font-weight:400;">
+          {dream.runId}{#if dream.enabled && dream.nextWriteAt} · Next {shortTime(dream.nextWriteAt)}{/if}
+        </span>
+      {/if}
+    </div>
+    <table class="fixed-cols" style="margin-bottom: 8px;">
+      <colgroup>
+        <col style="width:18%;" /><col style="width:16%;" /><col style="width:24%;" /><col style="width:24%;" /><col style="width:18%;" />
+      </colgroup>
+      <thead>
+        <tr><th>State</th><th>Writes</th><th>Recalls (Follow)</th><th>Memory</th><th>Score / Lift</th></tr>
+      </thead>
+      <tbody>
+        {#if !dream || !dream.hasData}
+          <tr><td colspan="5" class="sub">Dream ログなし（-EnableDream で有効化）</td></tr>
+        {:else}
+          <tr>
+            <td>
+              <span class="tag {dream.enabled ? 'ok' : ''}">
+                {dream.enabled ? `ON ${dream.intervalMin}m` : 'OFF'}
+              </span>
+            </td>
+            <td class="mono">{dream.writes}</td>
+            <td class="mono">{dream.recalls} <span class="sub">(follow {dream.followThroughs})</span></td>
+            <td class="mono">
+              <span class={dream.memory.bloatWarning ? 'tag warn' : ''}>
+                {dream.memory.totalEntries}件 / {formatBytes(dream.memory.bytes)}
+              </span>
+            </td>
+            <td class="mono">
+              {dream.latestScore ?? '-'}
+              {#if dream.postRecallLifts > 0}
+                <span class="tag ok">+{dream.postRecallLifts} lift</span>
+              {/if}
+            </td>
+          </tr>
+        {/if}
+      </tbody>
+    </table>
+    {#if dream?.recentEvents && dream.recentEvents.length > 0}
+      <div class="sub" style="margin: -4px 0 8px; padding: 4px 8px; background: #0b111e; border: 1px solid #1b2538; border-radius: 3px;">
+        {#each dream.recentEvents.slice(-3).reverse() as ev}
+          <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            <code>{shortTime(ev.ts)}</code>
+            <span class="tag {ev.event === 'dream_recall' ? 'ok' : ev.event === 'dream_write' ? 'warn' : ''}" style="margin:0 4px;">{ev.event}</span>
+            {#if ev.pickedHeadings && ev.pickedHeadings.length > 0}
+              <span>{ev.pickedHeadings.join(' / ')}</span>
+            {:else if ev.reason}
+              <span>{ev.reason}</span>
+            {:else if ev.turn}
+              <span>turn {ev.turn}</span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
     <div class="sec-label">SIDECARS</div>
     <table class="fixed-cols" style="margin-bottom: 8px;">
       <colgroup>

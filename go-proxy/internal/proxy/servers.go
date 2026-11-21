@@ -19,6 +19,7 @@ import (
 	"pi-proxy/internal/arena"
 	"pi-proxy/internal/binlog"
 	"pi-proxy/internal/config"
+	"pi-proxy/internal/dream"
 	"pi-proxy/internal/events"
 	"pi-proxy/internal/fsview"
 	"pi-proxy/internal/github"
@@ -115,6 +116,9 @@ func NewAPIHandler(d ServerDeps) http.Handler {
 			handleConfig(d, w, r)
 		case r.URL.Path == "/admin/health":
 			writeJSON(w, http.StatusOK, map[string]any{"targets": d.Monitor.Snapshot()})
+		case r.URL.Path == "/admin/dream/status":
+			cfg := d.Cfg.Get()
+			writeJSON(w, http.StatusOK, dream.Status(cfg.SessionsDir, cfg.Workspace))
 		case r.URL.Path == "/admin/strata/queue":
 			var items []strata.QueueItem
 			if d.StrataQueue != nil {
