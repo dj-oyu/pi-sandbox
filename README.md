@@ -1,86 +1,82 @@
 # pi-sandbox Meta-Harness
 
-Windows 11 ホスト上の **Sync-Strata**（GPU 推論）と、`wslc.exe` で隔離した **pi coding agent** を安全に連携させるためのメタハーネス環境です。
+Windows 11 ホストの **Sync-Strata**（ローカル GPU 推論）と、`wslc.exe` で隔離した **pi coding agent** を安全に繋ぐためのメタハーネス。細かいオプションは **[USAGE.md](./USAGE.md)** に全部書いた。ここでは「まず動かす」だけ。
 
----
-
-## 1. 全体構成
+## 1枚図
 
 ```text
-[Windows ホスト]
-  ├─ Sync-Strata (127.0.0.1:8080)       ... 推論エンジン (qwen3.8-flash-next-sync-s)
-  ├─ pi-proxy.exe (Go / :18080, :18888) ... 統合ゲートウェイ + バイナリログ (10MB x 5世代)
-  │    ├─ :18080  API 監査プロキシ / /gh-ci / /esp-idf/run / /admin/* (UI: /admin/ui)
-  │    ├─ :18888  許可リスト型 Egress プロキシ (allowlist.json 以外は 403 遮断)
-  │    └─ :19297  aws-emulator (HTTP->HTTPS) + pi-lambda-rie サブコンテナ実行 (-WithAwsEmulator)
-  └─ logs/                              ... バイナリ監査ログ (.bin) + セッション・メトリクス (.jsonl)
-       ▲
-       │ (WSL vEthernet IP 経由 / Bearer トークン認証)
-       ▼
-[wslc コンテナ (非 root: agent, --cap-drop=ALL)]
-  ├─ /workspace (rw)                    ... 作業リポジトリ (-Workspace)
-  ├─ /refs      (ro)                    ... 資料・参考コード (-RefsDir)
-  ├─ ~/.pi/agent/ (ro)                  ... ハーネス設定・拡張・Skills・Agents (sessions のみ rw)
-  └─ /usr/local/bin/idf.py (ro)         ... ホスト ESP-IDF + QEMU 呼び出しシム
+[ホスト] Sync-Strata :8080 (直列1リクエスト)
+   ▲ OpenAI互換 /v1/chat/completions
+[ホスト] pi-proxy.exe
+   ├─ :18080  API監査 + 管理UI /admin/ui + /gh-ci + /esp-idf/run + /admin/*
+   ├─ :18888  Egress allowlist プロキシ（allowlist.json 以外 403）
+   └─ :19297  aws-emulator ブリッジ（-WithAwsEmulator の時だけ）
+        ▲ Bearer token + vEthernet(WSL) IP（自動検出）
+[wslc] non-root agent / --cap-drop=ALL
+   /workspace rw ＋ /refs ro ＋ ~/.pi/agent ro(sessions だけ rw)
+   ホスト開放: 3000 / 5173 / 8000（127.0.0.1）
 ```
 
----
+## 1. 初回のビルド（1コマンド）
 
-## 2. コンテナイメージと起動スクリプト
-
-| 用途 | イメージ名 | 起動スクリプト | 特徴 |
-|---|---|---|---|
-| **汎用・M5Stack** | `pi-sandbox:latest` | `.\run-pi.ps1` | Node.js 22 / npm / Rust (cargo) / Go / uv / gcc / make / git / rg。<br>`idf.py` シム経由でホストの ESP-IDF + QEMU も利用可能。 |
-| **Web UI (Playwright)** | `pi-sandbox-web:latest` | `.\run-pi-web.ps1` | 上記 + Playwright (Chromium のみ)。`--shm-size 512m` で起動。 |
-| **AWS Emulator + Lambda** | `aws-emulator:latest` + `pi-lambda-rie:latest` | `.\run-pi-aws.ps1` | AWS 公式エミュレータ（S3/SQS/DynamoDB）＋ Lambda RIE サブコンテナ。`-Update` で上流追従。 |
-
-### 別 PC でのゼロからの再構築手順
-
-**ユーザー側で事前に用意するもの（このリポジトリ外）:**
-* **Windows 11 + WSL (`wslc.exe`)**: `wsl --update` で WSL コンテナ対応版を導入
-* **Sync-Strata**: ホスト側で起動しておく（`sync up --api-only` 等。ロード済みモデルは起動時に自動検出）
-* *(任意)* **GitHub CLI (`gh`)**（`/gh-ci` 監視を使う場合）、**ESP-IDF**（`idf.py` シムを使う場合）
-
-**このリポジトリのセットアップ（1 コマンド）:**
 ```powershell
-# 基本環境（pi-sandbox:latest + pi-proxy.exe + pi 初期設定）を構築
-.\setup.ps1
-
-# Web UI (Playwright) や AWS Emulator + Lambda RIE も含めて全部構築する場合
-.\setup.ps1 -All
+# WSL コンテナ対応か確認込みで、基底イメージ + pi-proxy.exe + 各種イメージを作る
+.\setup.ps1            # 汎用 pi-sandbox:latest + pi-proxy.exe のみ
+.\setup.ps1 -All       # Playwright (pi-sandbox-web) と AWS emu + Lambda RIE も
 ```
 
----
+前提（このリポジトリの外側で用意するもの）:
+- Windows 11 + `wslc`（`wsl --update` 済み）
+- Sync-Strata をホストで起動できること（会話まで要るならデスクトップの **Sync-Strata**、APIだけなら `sync up --api-only`）
+- 任意で GitHub CLI (`gh`)、ESP-IDF、M5Stack 実機
 
-## 3. 起動方法
+## 2. とりあえず動くコマンド
 
 ```powershell
-# 基本の起動（対話モード）
-.\run-pi.ps1 -Workspace <作業フォルダ>
+# (A) 対話で作業
+.\run-pi.ps1 -Workspace D:\vscode\my-repo
 
-# Web UI (Playwright) を使う場合
-.\run-pi-web.ps1 -Workspace <作業フォルダ>
+# (B) Web/E2E 付き（Chromium は shm 512m で起動）
+.\run-pi-web.ps1 -Workspace D:\vscode\my-repo
 
-# AWS Emulator + Lambda RIE を使う場合
-.\run-pi-aws.ps1 -Workspace <作業フォルダ>
+# (C) AWS エミュレータ + Lambda（コンテナ内 AWS_ENDPOINT_URL が自動設定）
+.\run-pi-aws.ps1 -Workspace D:\vscode\my-repo
 
-# 非対話バッチ実行（ハーネス評価用）
-.\run-pi-web.ps1 -Workspace <作業フォルダ> -PromptFile <プロンプトファイル>
+# (D) 非対話の自己改善バッチ（.pi/verifier.json が通るまで最大2ラウンド自動継続）
+.\run-pi-web.ps1 -Workspace D:\vscode\my-repo -PromptFile .\task.md -NonInteractive
 ```
 
----
-
-## 4. ログ観測と JSONL 変換
-
-`pi-proxy.exe` は `api-audit.bin` / `egress.bin` / `control.bin` を CRC32 付きバイナリログとして保存し（10 MiB × 5 世代）、CLI または管理 API から JSONL へ変換できます。
+Sync-Strata は必ず **先に起こしてから** 実行する（`-Model auto` は :8080 のモデル一覧を見るため）。
 
 ```powershell
-# CLI で JSONL 変換
-.\pi-proxy.exe export-logs --file .\logs\api-audit.bin --tail 50
+sync status            # エンジンと dsh が生きているか
+sync gui-url           # ブラウザで開く URL
+```
 
-# ハーネス・自己改善ループのリアルタイム監視
+## 3. 確認の最短ルート
+
+```powershell
+# 管理コンソール（起動ログに出る token 付き URL をそのまま貼る）
+#   http://127.0.0.1:18080/admin/ui/?token=...
+# 検証スコアの推移
 Get-Content .\logs\sessions\verify-metrics.jsonl -Wait
+# ハーネスの視点転換（停滞→再構築）
 Get-Content .\logs\sessions\perturbation.jsonl -Wait
+# 外向きの通信（遮断含む）を JSONL で見る
+.\pi-proxy.exe export-logs --file .\logs\egress.bin --tail 50
 ```
 
-管理コンソール（Strata 直接対話・SaaS AI マッチング・ヘルス監視・ジョブ一覧）はプロキシ起動中に `http://127.0.0.1:18080/admin/ui` から利用できます。
+## 4. 置き場所
+
+| もの | 場所 |
+|---|---|
+| イメージ | `pi-sandbox:latest` / `pi-sandbox-web:latest` / `aws-emulator:latest` / `pi-lambda-rie:latest` |
+| ゲートウェイ | `.\pi-proxy.exe`（`go-proxy/` を `wslc` の中でビルド。既存ならスキップされるので、直したら exe を消す） |
+| ログ | `logs/` = `api-audit.bin` / `egress.bin` / `control.bin`（10 MiB × 5 世代）＋ `sessions/*.jsonl`（会話・計測） |
+| 資料 | `refs/` → コンテナの `/refs`（読み取り専用。verifier / e2e / fixtures を置く運用が実履歴上の既定） |
+
+すべてオプション（モデル固定、トークン再利用、Dream、ジョブ数、ポート番号など）は **[USAGE.md](./USAGE.md)** を読むこと。
+
+## 5. ライセンス
+
+このリポジトリのコードは **MIT License**（[LICENSE](./LICENSE)）。ただしビルドで取り込む実行環境や、外部から起動する Sync-Strata / WSL / pi / ESP-IDF / AWS Emulator は別ライセンスなので、再配布時の切り分けは [NOTICE.md](./NOTICE.md) を見ること。
