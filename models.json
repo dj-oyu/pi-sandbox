@@ -3,7 +3,7 @@
     "sync-strata": {
       "baseUrl": "http://__WSL_HOST_IP__:18080/v1",
       "api": "openai-completions",
-      "apiKey": "STRATA_PROXY_TOKEN",
+      "apiKey": "$STRATA_PROXY_TOKEN",
       "models": [
         {
           "id": "__STRATA_MODEL_ID__",
