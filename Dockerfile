@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM debian:bookworm-slim AS builder
 
-ARG NODE_VERSION=22.14.0
+ARG NODE_VERSION=22.23.5
 ARG GO_VERSION=1.24.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +15,7 @@ ENV PATH="/usr/local/node/bin:${PATH}"
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
     | tar -xJ -C /usr/local \
     && mv "/usr/local/node-v${NODE_VERSION}-linux-x64" /usr/local/node \
-    && npm install -g @earendil-works/pi-coding-agent@0.74.2 \
+    && npm install -g @earendil-works/pi-coding-agent@1.6.0 \
     && npm cache clean --force
 
 # 2. Go
@@ -29,10 +29,6 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-
 
 # 4. uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
-
-# 5. Patch @earendil-works/pi-coding-agent (stale extension ctx after reload/session replacement)
-COPY patches/patch-pi-coding-agent.mjs /tmp/patch-pi-coding-agent.mjs
-RUN node /tmp/patch-pi-coding-agent.mjs && rm -f /tmp/patch-pi-coding-agent.mjs
 
 # -----------------------------------------------------------------------------
 # Final minimal runtime stage (no apt/dpkg/curl/wget, non-root user)
